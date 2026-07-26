@@ -1,5 +1,5 @@
-//! Finite element domain objects.
+pub mod element_2d;
+pub mod interpolation;
 
-pub mod bar_1d;
-
-pub use bar_1d::BarElement1D;
+pub use element_2d::{Beam2D, Element2D, TriangleT3, Truss2D};
+pub use interpolation::Interpolation;
