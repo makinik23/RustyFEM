@@ -85,8 +85,8 @@ impl DofNumbering2D {
 mod tests {
     use super::DofNumbering2D;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-    use crate::model::{Dof2D, Model2D, Node2D};
     use crate::model::DisplacementConstraint2D;
+    use crate::model::{Dof2D, Model2D, Node2D};
 
     #[test]
     fn numbers_beam_degrees_of_freedom() {
