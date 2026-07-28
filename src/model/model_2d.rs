@@ -232,7 +232,7 @@ mod tests {
         model.add_node(first_node).expect("node should be added");
         model.add_node(second_node).expect("node should be added");
 
-        let truss = Truss2D::new(10, [1, 2]).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created");
         let element = Element2D::Truss(truss);
 
         model.add_element(element).expect("element should be added");
@@ -250,7 +250,7 @@ mod tests {
 
         model.add_node(node).expect("node should be added");
 
-        let element = Element2D::Truss(Truss2D::new(10, [1, 99]).expect("valid truss should be created"));
+        let element = Element2D::Truss(Truss2D::new(10, [1, 99], 1.0).expect("valid truss should be created"));
 
         let result = model.add_element(element);
 
@@ -272,18 +272,18 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(10, [1, 2]).expect("valid truss connectivity should be created")),
+                Element2D::Truss(Truss2D::new(10, [1, 2], 1.0).expect("valid truss connectivity should be created")),
                 "length",
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(20, [1, 2]).expect("valid beam connectivity should be created")),
+                Element2D::Beam(Beam2D::new(20, [1, 2], 1.0, 1.0).expect("valid beam connectivity should be created")),
                 "length",
             ),
             (
                 "triangle_t3",
                 Element2D::TriangleT3(
-                    TriangleT3::new(30, [1, 2, 3]).expect("valid triangle connectivity should be created"),
+                    TriangleT3::new(30, [1, 2, 3], 1.0).expect("valid triangle connectivity should be created"),
                 ),
                 "area",
             ),

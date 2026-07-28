@@ -124,9 +124,9 @@ fn read_constraints(model: &mut Model2D) -> io::Result<()> {
 fn read_elements(model: &mut Model2D) -> io::Result<()> {
     println!();
     println!("Enter elements as:");
-    println!("  truss ID NODE_1 NODE_2");
-    println!("  beam ID NODE_1 NODE_2");
-    println!("  triangle ID NODE_1 NODE_2 NODE_3");
+    println!("  truss ID NODE_1 NODE_2 AREA");
+    println!("  beam ID NODE_1 NODE_2 AREA I");
+    println!("  triangle ID NODE_1 NODE_2 NODE_3 THICKNESS");
     println!("Type 'done' when finished.");
 
     loop {
@@ -191,38 +191,46 @@ fn parse_element_line(line: &str) -> Result<Element2D, String> {
 
     match parts[0].to_ascii_lowercase().as_str() {
         "truss" => {
-            if parts.len() != 4 {
-                return Err("expected: truss ID NODE_1 NODE_2".to_owned());
+            if parts.len() != 5 {
+                return Err("expected: truss ID NODE_1 NODE_2 AREA".to_owned());
             }
 
             let id = parse_usize(parts[1], "element ID")?;
             let first_node_id = parse_usize(parts[2], "first node ID")?;
             let second_node_id = parse_usize(parts[3], "second node ID")?;
+            let cross_section_area = parse_f64(parts[4], "cross-sectional area")?;
 
-            Truss2D::new(id, [first_node_id, second_node_id]).map(Element2D::Truss).map_err(|error| error.to_string())
+            Truss2D::new(id, [first_node_id, second_node_id], cross_section_area)
+                .map(Element2D::Truss)
+                .map_err(|error| error.to_string())
         }
         "beam" => {
-            if parts.len() != 4 {
-                return Err("expected: beam ID NODE_1 NODE_2".to_owned());
+            if parts.len() != 6 {
+                return Err("expected: beam ID NODE_1 NODE_2 AREA I".to_owned());
             }
 
             let id = parse_usize(parts[1], "element ID")?;
             let first_node_id = parse_usize(parts[2], "first node ID")?;
             let second_node_id = parse_usize(parts[3], "second node ID")?;
+            let cross_section_area = parse_f64(parts[4], "cross-sectional area")?;
+            let second_moment_of_area = parse_f64(parts[5], "second moment of area")?;
 
-            Beam2D::new(id, [first_node_id, second_node_id]).map(Element2D::Beam).map_err(|error| error.to_string())
+            Beam2D::new(id, [first_node_id, second_node_id], cross_section_area, second_moment_of_area)
+                .map(Element2D::Beam)
+                .map_err(|error| error.to_string())
         }
         "triangle" | "triangle_t3" | "t3" => {
-            if parts.len() != 5 {
-                return Err("expected: triangle ID NODE_1 NODE_2 NODE_3".to_owned());
+            if parts.len() != 6 {
+                return Err("expected: triangle ID NODE_1 NODE_2 NODE_3 THICKNESS".to_owned());
             }
 
             let id = parse_usize(parts[1], "element ID")?;
             let first_node_id = parse_usize(parts[2], "first node ID")?;
             let second_node_id = parse_usize(parts[3], "second node ID")?;
             let third_node_id = parse_usize(parts[4], "third node ID")?;
+            let thickness = parse_f64(parts[5], "thickness")?;
 
-            TriangleT3::new(id, [first_node_id, second_node_id, third_node_id])
+            TriangleT3::new(id, [first_node_id, second_node_id, third_node_id], thickness)
                 .map(Element2D::TriangleT3)
                 .map_err(|error| error.to_string())
         }
@@ -285,8 +293,8 @@ mod tests {
 
     #[test]
     fn parses_element_line() {
-        let truss = parse_element_line("truss 10 1 2").expect("valid truss should be parsed");
-        let triangle = parse_element_line("triangle 20 1 2 3").expect("valid triangle should be parsed");
+        let truss = parse_element_line("truss 10 1 2 0.01").expect("valid truss should be parsed");
+        let triangle = parse_element_line("triangle 20 1 2 3 0.1").expect("valid triangle should be parsed");
 
         assert!(matches!(truss, Element2D::Truss(_)));
         assert!(matches!(triangle, Element2D::TriangleT3(_)));
@@ -295,6 +303,9 @@ mod tests {
     #[test]
     fn rejects_invalid_element_line() {
         assert!(parse_element_line("beam 10 1").is_err());
+        assert!(parse_element_line("beam 10 1 2").is_err());
+        assert!(parse_element_line("truss 10 1 2").is_err());
+        assert!(parse_element_line("triangle 10 1 2 3").is_err());
         assert!(parse_element_line("hexagon 10 1 2").is_err());
     }
 }

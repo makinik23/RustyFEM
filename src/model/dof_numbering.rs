@@ -96,7 +96,7 @@ mod tests {
 
         model.add_node(Node2D::new(20, 1.0, 0.0).expect("valid node")).expect("node should be added");
 
-        let beam = Beam2D::new(1, [10, 20]).expect("valid beam");
+        let beam = Beam2D::new(1, [10, 20], 1.0, 1.0).expect("valid beam");
 
         model.add_element(Element2D::Beam(beam)).expect("element should be added");
 
@@ -118,17 +118,17 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(1, [10, 20]).expect("valid truss should be created")),
+                Element2D::Truss(Truss2D::new(1, [10, 20], 1.0).expect("valid truss should be created")),
                 vec![0, 1, 2, 3],
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(2, [10, 20]).expect("valid beam should be created")),
+                Element2D::Beam(Beam2D::new(2, [10, 20], 1.0, 1.0).expect("valid beam should be created")),
                 vec![0, 1, 2, 3, 4, 5],
             ),
             (
                 "triangle_t3",
-                Element2D::TriangleT3(TriangleT3::new(3, [10, 20, 30]).expect("valid triangle should be created")),
+                Element2D::TriangleT3(TriangleT3::new(3, [10, 20, 30], 1.0).expect("valid triangle should be created")),
                 vec![0, 1, 2, 3, 4, 5],
             ),
         ];
@@ -163,7 +163,7 @@ mod tests {
         model.add_node(Node2D::new(20, 1.0, 0.0).expect("valid node")).expect("node should be added");
 
         model
-            .add_element(Element2D::Beam(Beam2D::new(1, [10, 20]).expect("valid beam")))
+            .add_element(Element2D::Beam(Beam2D::new(1, [10, 20], 1.0, 1.0).expect("valid beam")))
             .expect("element should be added");
 
         let constraints = [(10, Dof2D::Ux, 0.0), (10, Dof2D::Rz, 0.01), (20, Dof2D::Uy, 0.0)];
