@@ -1,6 +1,7 @@
 //! Defines a 2D model consisting of nodes and displacement constraints.
 
 use super::constraint::DisplacementConstraint2D;
+use super::material::Material2D;
 use super::node::Node2D;
 use crate::elements::Element2D;
 use crate::error::FemError;
@@ -11,6 +12,7 @@ pub struct Model2D {
     nodes: Vec<Node2D>,
     constraints: Vec<DisplacementConstraint2D>,
     elements: Vec<Element2D>,
+    material: Option<Material2D>,
 }
 
 impl Model2D {
@@ -59,10 +61,17 @@ impl Model2D {
         Ok(())
     }
 
+    /// Sets the material properties for the model.
+    pub fn set_material(&mut self, material: Material2D) {
+        self.material = Some(material);
+    }
+
+    /// Finds a node in the model by its ID. Returns a reference to the node if found, or an error if the node ID does not exist in the model.
     fn find_node(&self, node_id: usize) -> Result<&Node2D, FemError> {
         self.nodes.iter().find(|node| node.id() == node_id).ok_or(FemError::UnknownId { entity: "node", id: node_id })
     }
 
+    /// Validates the geometry of an element. Returns an error if the element is degenerate (e.g., zero length for trusses and beams, or zero area for triangles).
     fn validate_element_geometry(&self, element: &Element2D) -> Result<(), FemError> {
         let node_ids = element.node_ids();
         let first_node = self.find_node(node_ids[0])?;
@@ -129,6 +138,12 @@ impl Model2D {
     pub fn elements(&self) -> &[Element2D] {
         &self.elements
     }
+
+    /// Returns the material properties of the model.
+    #[must_use]
+    pub fn material(&self) -> Option<&Material2D> {
+        self.material.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -136,7 +151,7 @@ mod tests {
     use super::Model2D;
     use crate::FemError;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-    use crate::model::{DisplacementConstraint2D, Dof2D, Node2D};
+    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, Node2D};
 
     #[test]
     fn creates_empty_model() {
@@ -145,6 +160,7 @@ mod tests {
         assert!(model.nodes().is_empty());
         assert!(model.constraints().is_empty());
         assert!(model.elements().is_empty());
+        assert!(model.material().is_none());
     }
 
     #[test]
@@ -293,5 +309,19 @@ mod tests {
         }
 
         assert!(model.elements().is_empty());
+    }
+
+    #[test]
+    fn replaces_existing_material() {
+        let mut model = Model2D::new();
+
+        let first = Material2D::new(210e9, 0.3, 7800.0).expect("valid material should be created");
+
+        let second = Material2D::new(70e9, 0.33, 2700.0).expect("valid material should be created");
+
+        model.set_material(first);
+        model.set_material(second);
+
+        assert_eq!(model.material(), Some(&second));
     }
 }

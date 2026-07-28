@@ -31,4 +31,7 @@ pub enum FemError {
 
     #[error("node {node_id} does not have degree of freedom {dof}")]
     UnknownDof { node_id: usize, dof: &'static str },
+
+    #[error("material has invalid {property}: {value}; {reason}")]
+    InvalidMaterialProperty { property: &'static str, value: f64, reason: &'static str },
 }
