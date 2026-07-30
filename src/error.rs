@@ -17,6 +17,15 @@ pub enum FemError {
     #[error("element {element_id} has invalid connectivity: {node_ids:?}")]
     InvalidElementConnectivity { element_id: usize, node_ids: Vec<usize> },
 
+    #[error("element {element_id} ({element_type}) has invalid {property}: {value}; {reason}")]
+    InvalidElementProperty {
+        element_id: usize,
+        element_type: &'static str,
+        property: &'static str,
+        value: f64,
+        reason: &'static str,
+    },
+
     #[error("element {element_id} ({element_type}) is degenerate: {measure_name} = {measure}; node IDs: {node_ids:?}")]
     DegenerateElement {
         element_id: usize,
@@ -31,4 +40,10 @@ pub enum FemError {
 
     #[error("node {node_id} does not have degree of freedom {dof}")]
     UnknownDof { node_id: usize, dof: &'static str },
+
+    #[error("material has invalid {property}: {value}; {reason}")]
+    InvalidMaterialProperty { property: &'static str, value: f64, reason: &'static str },
+
+    #[error("model has no material")]
+    MissingMaterial,
 }
