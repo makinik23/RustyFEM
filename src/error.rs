@@ -43,4 +43,7 @@ pub enum FemError {
 
     #[error("material has invalid {property}: {value}; {reason}")]
     InvalidMaterialProperty { property: &'static str, value: f64, reason: &'static str },
+
+    #[error("model has no material")]
+    MissingMaterial,
 }
