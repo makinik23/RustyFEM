@@ -46,4 +46,18 @@ pub enum FemError {
 
     #[error("model has no material")]
     MissingMaterial,
+
+    #[error("nodal load on node {node_id} has invalid value: {value}")]
+    InvalidNodalLoad { node_id: usize, value: f64 },
+
+    #[error(
+        "linear system has incompatible dimensions: stiffness matrix is {stiffness_rows}x{stiffness_columns}, load vector has length {load_vector_length}"
+    )]
+    IncompatibleLinearSystem { stiffness_rows: usize, stiffness_columns: usize, load_vector_length: usize },
+
+    #[error("linear system references invalid DOF index: {index}")]
+    InvalidDofIndex { index: usize },
+
+    #[error("the stiffness matrix is singular")]
+    SingularSystem,
 }
