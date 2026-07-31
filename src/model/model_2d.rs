@@ -1,6 +1,7 @@
 //! Defines a 2D model consisting of nodes and displacement constraints.
 
 use super::constraint::DisplacementConstraint2D;
+use super::load::NodalLoad2D;
 use super::material::Material2D;
 use super::node::Node2D;
 use crate::elements::Element2D;
@@ -13,6 +14,7 @@ pub struct Model2D {
     constraints: Vec<DisplacementConstraint2D>,
     elements: Vec<Element2D>,
     material: Option<Material2D>,
+    loads: Vec<NodalLoad2D>,
 }
 
 impl Model2D {
@@ -121,6 +123,16 @@ impl Model2D {
         Ok(())
     }
 
+    pub fn add_load(&mut self, load: NodalLoad2D) -> Result<(), FemError> {
+        if !self.nodes.iter().any(|node| node.id() == load.node_id()) {
+            return Err(FemError::UnknownId { entity: "node", id: load.node_id() });
+        }
+
+        self.loads.push(load);
+
+        Ok(())
+    }
+
     /// Returns a slice of all nodes in the model.
     #[must_use]
     pub fn nodes(&self) -> &[Node2D] {
@@ -144,6 +156,12 @@ impl Model2D {
     pub fn material(&self) -> Option<&Material2D> {
         self.material.as_ref()
     }
+
+    /// Returns a slice of all nodal loads in the model.
+    #[must_use]
+    pub fn loads(&self) -> &[NodalLoad2D] {
+        &self.loads
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +169,7 @@ mod tests {
     use super::Model2D;
     use crate::FemError;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, Node2D};
+    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, NodalLoad2D, Node2D};
 
     #[test]
     fn creates_empty_model() {
@@ -219,6 +237,35 @@ mod tests {
         assert!(matches!(result, Err(FemError::UnknownId { entity: "node", id: 99 })));
 
         assert!(model.constraints().is_empty());
+    }
+
+    #[test]
+    fn rejects_load_for_unknown_node() {
+        let mut model = Model2D::new();
+        let load = NodalLoad2D::new(99, Dof2D::Ux, 10.0).expect("valid load should be created");
+
+        let result = model.add_load(load);
+
+        assert!(matches!(result, Err(FemError::UnknownId { entity: "node", id: 99 })));
+        assert!(model.loads().is_empty());
+    }
+
+    #[test]
+    fn allows_multiple_loads_on_the_same_dof() {
+        let mut model = Model2D::new();
+        let node = Node2D::new(7, 0.0, 0.0).expect("valid node should be created");
+
+        model.add_node(node).expect("node should be added");
+
+        let first_load = NodalLoad2D::new(7, Dof2D::Ux, 10.0).expect("valid load should be created");
+        let second_load = NodalLoad2D::new(7, Dof2D::Ux, -3.0).expect("valid load should be created");
+
+        model.add_load(first_load).expect("first load should be added");
+        model.add_load(second_load).expect("second load should be added");
+
+        assert_eq!(model.loads().len(), 2);
+        assert_eq!(model.loads()[0], first_load);
+        assert_eq!(model.loads()[1], second_load);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 use std::io::{self, Write};
 
 use clap::Parser;
+use rusty_fem::analysis::solver::{AnalysisResult2D, solve};
 use rusty_fem::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-use rusty_fem::model::{AnalysisSpace, DisplacementConstraint2D, Dof2D, Model2D, Node2D};
+use rusty_fem::model::{
+    AnalysisSpace, DisplacementConstraint2D, Dof2D, DofNumbering2D, Material2D, Model2D, NodalLoad2D, Node2D,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "rusty-fem", about = "Educational finite element method solver")]
@@ -32,15 +35,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut model = Model2D::new();
 
+    read_material(&mut model)?;
     read_nodes(&mut model)?;
     read_constraints(&mut model)?;
     read_elements(&mut model)?;
+    read_loads(&mut model)?;
 
     println!();
     println!("Model summary:");
     println!("  nodes: {}", model.nodes().len());
     println!("  constraints: {}", model.constraints().len());
     println!("  elements: {}", model.elements().len());
+    println!("  loads: {}", model.loads().len());
+
+    println!();
+    match solve(&model) {
+        Ok(result) => print_analysis_results(&model, &result)?,
+        Err(error) => println!("Could not solve model: {error}"),
+    }
 
     Ok(())
 }
@@ -68,6 +80,27 @@ fn read_analysis_space() -> io::Result<AnalysisSpace> {
         match line.parse::<AnalysisSpace>() {
             Ok(space) => return Ok(space),
             Err(error) => println!("Invalid analysis space: {error}"),
+        }
+    }
+}
+
+fn read_material(model: &mut Model2D) -> io::Result<()> {
+    println!();
+    println!("Enter material as: YOUNG_MODULUS POISSON_RATIO DENSITY");
+
+    loop {
+        let Some(line) = prompt_line("material> ")? else {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "input ended"));
+        };
+
+        match parse_material_line(&line) {
+            Ok(material) => {
+                model.set_material(material);
+                println!("Material set.");
+
+                return Ok(());
+            }
+            Err(error) => println!("Invalid material: {error}"),
         }
     }
 }
@@ -154,6 +187,56 @@ fn read_elements(model: &mut Model2D) -> io::Result<()> {
     }
 }
 
+fn read_loads(model: &mut Model2D) -> io::Result<()> {
+    println!();
+    println!("Enter loads as: NODE_ID DOF VALUE");
+    println!("DOF must be Ux, Uy, or Rz.");
+    println!("Type 'done' when finished.");
+
+    loop {
+        let Some(line) = prompt_line("load> ")? else {
+            return Ok(());
+        };
+
+        if line.eq_ignore_ascii_case("done") {
+            return Ok(());
+        }
+
+        match parse_load_line(&line) {
+            Ok(load) => match model.add_load(load) {
+                Ok(()) => println!("Load added."),
+                Err(error) => println!("Could not add load: {error}"),
+            },
+            Err(error) => println!("Invalid load: {error}"),
+        }
+    }
+}
+
+fn print_analysis_results(model: &Model2D, result: &AnalysisResult2D) -> Result<(), Box<dyn std::error::Error>> {
+    let numbering = DofNumbering2D::from_model(model)?;
+    let ordered_dofs = [Dof2D::Ux, Dof2D::Uy, Dof2D::Rz];
+
+    println!("Displacements:");
+
+    for node in model.nodes() {
+        for dof in ordered_dofs {
+            if let Ok(index) = numbering.index(node.id(), dof) {
+                println!("  node {} {} = {:.12}", node.id(), dof.name(), result.displacements()[index]);
+            }
+        }
+    }
+
+    println!("Reactions:");
+
+    for constraint in model.constraints() {
+        let index = numbering.index(constraint.node_id(), constraint.dof())?;
+
+        println!("  node {} {} = {:.12}", constraint.node_id(), constraint.dof().name(), result.reactions()[index]);
+    }
+
+    Ok(())
+}
+
 fn parse_node_line(line: &str) -> Result<Node2D, String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
 
@@ -180,6 +263,34 @@ fn parse_constraint_line(line: &str) -> Result<DisplacementConstraint2D, String>
     let displacement = parse_f64(parts[2], "displacement")?;
 
     DisplacementConstraint2D::new(node_id, dof, displacement).map_err(|error| error.to_string())
+}
+
+fn parse_material_line(line: &str) -> Result<Material2D, String> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+
+    if parts.len() != 3 {
+        return Err("expected: YOUNG_MODULUS POISSON_RATIO DENSITY".to_owned());
+    }
+
+    let young_modulus = parse_f64(parts[0], "Young's modulus")?;
+    let poisson_ratio = parse_f64(parts[1], "Poisson's ratio")?;
+    let density = parse_f64(parts[2], "density")?;
+
+    Material2D::new(young_modulus, poisson_ratio, density).map_err(|error| error.to_string())
+}
+
+fn parse_load_line(line: &str) -> Result<NodalLoad2D, String> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+
+    if parts.len() != 3 {
+        return Err("expected: NODE_ID DOF VALUE".to_owned());
+    }
+
+    let node_id = parse_usize(parts[0], "node ID")?;
+    let dof = parse_dof(parts[1])?;
+    let value = parse_f64(parts[2], "load value")?;
+
+    NodalLoad2D::new(node_id, dof, value).map_err(|error| error.to_string())
 }
 
 fn parse_element_line(line: &str) -> Result<Element2D, String> {
@@ -257,7 +368,9 @@ fn parse_f64(value: &str, name: &str) -> Result<f64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_constraint_line, parse_dof, parse_element_line, parse_node_line};
+    use super::{
+        parse_constraint_line, parse_dof, parse_element_line, parse_load_line, parse_material_line, parse_node_line,
+    };
     use rusty_fem::elements::Element2D;
     use rusty_fem::model::Dof2D;
 
@@ -282,6 +395,38 @@ mod tests {
         assert_eq!(constraint.node_id(), 7);
         assert_eq!(constraint.dof(), Dof2D::Uy);
         assert_eq!(constraint.displacement(), 0.0);
+    }
+
+    #[test]
+    fn parses_material_line() {
+        let material = parse_material_line("200.0 0.3 7800.0").expect("valid material should be parsed");
+
+        assert_eq!(material.young_modulus(), 200.0);
+        assert_eq!(material.poisson_ratio(), 0.3);
+        assert_eq!(material.density(), 7800.0);
+    }
+
+    #[test]
+    fn rejects_invalid_material_line() {
+        assert!(parse_material_line("200.0 0.3").is_err());
+        assert!(parse_material_line("200.0 0.5 7800.0").is_err());
+        assert!(parse_material_line("abc 0.3 7800.0").is_err());
+    }
+
+    #[test]
+    fn parses_load_line() {
+        let load = parse_load_line("7 Uy -12.5").expect("valid load should be parsed");
+
+        assert_eq!(load.node_id(), 7);
+        assert_eq!(load.dof(), Dof2D::Uy);
+        assert_eq!(load.value(), -12.5);
+    }
+
+    #[test]
+    fn rejects_invalid_load_line() {
+        assert!(parse_load_line("7 Uy").is_err());
+        assert!(parse_load_line("7 Rz NaN").is_err());
+        assert!(parse_load_line("7 Unknown 10.0").is_err());
     }
 
     #[test]
