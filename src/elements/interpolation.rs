@@ -1,5 +1,7 @@
 //! Defines interpolation methods used to approximate a displacement field inside an element.
 
+use crate::error::FemError;
+
 /// Interpolation used to approximate a displacement field inside an element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interpolation {
@@ -11,4 +13,145 @@ pub enum Interpolation {
 
     /// Linear interpolation over a three-node triangle.
     LinearTriangleT3,
+}
+
+/// Returns the two linear Lagrange shape functions evaluated at `xi`.
+///
+/// The natural coordinate is usually in `[0, 1]`, but the polynomial is also
+/// defined outside that interval for extrapolation.
+#[must_use]
+pub fn linear_lagrange_shape_functions(xi: f64) -> [f64; 2] {
+    [1.0 - xi, xi]
+}
+
+/// Returns the four cubic Hermite shape functions for a beam's transverse field.
+///
+/// The returned functions multiply `[v1, theta1, v2, theta2]`, respectively.
+/// `xi` is the normalized coordinate `x / length`.
+pub fn cubic_hermite_shape_functions(xi: f64, length: f64) -> Result<[f64; 4], FemError> {
+    validate_interpolation_length(length)?;
+
+    Ok([
+        1.0 - 3.0 * xi.powi(2) + 2.0 * xi.powi(3),
+        length * (xi - 2.0 * xi.powi(2) + xi.powi(3)),
+        3.0 * xi.powi(2) - 2.0 * xi.powi(3),
+        length * (-xi.powi(2) + xi.powi(3)),
+    ])
+}
+
+/// Returns first derivatives with respect to the physical coordinate `x` of
+/// the four cubic Hermite shape functions.
+pub fn cubic_hermite_first_derivatives(xi: f64, length: f64) -> Result<[f64; 4], FemError> {
+    validate_interpolation_length(length)?;
+
+    Ok([
+        (-6.0 * xi + 6.0 * xi.powi(2)) / length,
+        1.0 - 4.0 * xi + 3.0 * xi.powi(2),
+        (6.0 * xi - 6.0 * xi.powi(2)) / length,
+        -2.0 * xi + 3.0 * xi.powi(2),
+    ])
+}
+
+/// Returns second derivatives with respect to the physical coordinate `x` of
+/// the four cubic Hermite shape functions.
+pub fn cubic_hermite_second_derivatives(xi: f64, length: f64) -> Result<[f64; 4], FemError> {
+    validate_interpolation_length(length)?;
+
+    Ok([
+        (-6.0 + 12.0 * xi) / length.powi(2),
+        (-4.0 + 6.0 * xi) / length,
+        (6.0 - 12.0 * xi) / length.powi(2),
+        (-2.0 + 6.0 * xi) / length,
+    ])
+}
+
+/// Returns the three linear shape functions of a T3 triangle.
+///
+/// `xi` and `eta` are the two natural coordinates. The physical triangle is
+/// represented by `xi >= 0`, `eta >= 0`, and `xi + eta <= 1`.
+#[must_use]
+pub fn triangle_t3_shape_functions(xi: f64, eta: f64) -> [f64; 3] {
+    [1.0 - xi - eta, xi, eta]
+}
+
+fn validate_interpolation_length(length: f64) -> Result<(), FemError> {
+    if !length.is_finite() || length <= 0.0 {
+        return Err(FemError::InvalidInterpolationLength { value: length });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cubic_hermite_first_derivatives, cubic_hermite_second_derivatives, cubic_hermite_shape_functions,
+        linear_lagrange_shape_functions, triangle_t3_shape_functions,
+    };
+    use crate::FemError;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn linear_lagrange_functions_have_partition_of_unity() {
+        let functions = linear_lagrange_shape_functions(0.25);
+
+        assert_relative_eq!(functions[0] + functions[1], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(functions[0], 0.75, epsilon = 1e-12);
+        assert_relative_eq!(functions[1], 0.25, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn cubic_hermite_functions_reproduce_nodal_values() {
+        let at_first_node = cubic_hermite_shape_functions(0.0, 2.0).expect("valid length");
+        let at_second_node = cubic_hermite_shape_functions(1.0, 2.0).expect("valid length");
+
+        assert_eq!(at_first_node, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(at_second_node, [0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cubic_hermite_first_derivatives_reproduce_nodal_rotations() {
+        let at_first_node = cubic_hermite_first_derivatives(0.0, 2.0).expect("valid length");
+        let at_second_node = cubic_hermite_first_derivatives(1.0, 2.0).expect("valid length");
+
+        assert_relative_eq!(at_first_node[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_first_node[1], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(at_first_node[2], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_first_node[3], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_second_node[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_second_node[1], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_second_node[2], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(at_second_node[3], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn cubic_hermite_second_derivatives_reproduce_a_rigid_linear_field() {
+        let derivatives = cubic_hermite_second_derivatives(0.5, 2.0).expect("valid length");
+        let curvature = derivatives[0] * 0.0 + derivatives[1] * 1.0 + derivatives[2] * 2.0 + derivatives[3] * 1.0;
+
+        assert_relative_eq!(curvature, 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn triangle_functions_have_partition_of_unity() {
+        let functions = triangle_t3_shape_functions(0.2, 0.3);
+
+        assert_relative_eq!(functions.iter().sum::<f64>(), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(functions[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(functions[1], 0.2, epsilon = 1e-12);
+        assert_relative_eq!(functions[2], 0.3, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn rejects_invalid_hermite_length() {
+        let cases = [0.0, -1.0, f64::INFINITY, f64::NAN];
+
+        for length in cases {
+            let result = cubic_hermite_shape_functions(0.5, length);
+
+            assert!(
+                matches!(result, Err(FemError::InvalidInterpolationLength { value }) if value == length || (value.is_nan() && length.is_nan()))
+            );
+        }
+    }
 }

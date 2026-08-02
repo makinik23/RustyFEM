@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 
 use clap::Parser;
+use rusty_fem::FemError;
 use rusty_fem::analysis::solver::{AnalysisResult2D, solve};
+use rusty_fem::analysis::{ElementResponse2D, recover_beam_section_response, recover_model_responses};
 use rusty_fem::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
 use rusty_fem::model::{
     AnalysisSpace, DisplacementConstraint2D, Dof2D, DofNumbering2D, Material2D, Model2D, NodalLoad2D, Node2D,
@@ -158,7 +160,7 @@ fn read_elements(model: &mut Model2D) -> io::Result<()> {
     println!();
     println!("Enter elements as:");
     println!("  truss ID NODE_1 NODE_2 AREA");
-    println!("  beam ID NODE_1 NODE_2 AREA I");
+    println!("  beam ID NODE_1 NODE_2 AREA I HEIGHT");
     println!("  triangle ID NODE_1 NODE_2 NODE_3 THICKNESS");
     println!("Type 'done' when finished.");
 
@@ -232,6 +234,99 @@ fn print_analysis_results(model: &Model2D, result: &AnalysisResult2D) -> Result<
         let index = numbering.index(constraint.node_id(), constraint.dof())?;
 
         println!("  node {} {} = {:.12}", constraint.node_id(), constraint.dof().name(), result.reactions()[index]);
+    }
+
+    println!("Element responses:");
+
+    for (element_id, response) in recover_model_responses(model, result.displacements())? {
+        print_element_response(element_id, response);
+    }
+
+    print_beam_section_results(model, result)?;
+
+    Ok(())
+}
+
+fn print_element_response(element_id: usize, response: ElementResponse2D) {
+    match response {
+        ElementResponse2D::Truss(response) => {
+            println!(
+                "  element {element_id} truss: strain = {:.12}, stress = {:.12}, axial_force = {:.12}",
+                response.strain(),
+                response.stress(),
+                response.axial_force(),
+            );
+        }
+        ElementResponse2D::Beam(response) => {
+            println!(
+                "  element {element_id} beam: [N1, V1, M1, N2, V2, M2] = [{:.12}, {:.12}, {:.12}, {:.12}, {:.12}, {:.12}]",
+                response.first_axial_force(),
+                response.first_shear_force(),
+                response.first_bending_moment(),
+                response.second_axial_force(),
+                response.second_shear_force(),
+                response.second_bending_moment(),
+            );
+        }
+        ElementResponse2D::Triangle(response) => {
+            let strain = response.strain();
+            let stress = response.stress();
+
+            println!(
+                "  element {element_id} triangle: strain = [{:.12}, {:.12}, {:.12}], stress = [{:.12}, {:.12}, {:.12}], von_mises = {:.12}",
+                strain[0],
+                strain[1],
+                strain[2],
+                stress[0],
+                stress[1],
+                stress[2],
+                response.von_mises_stress(),
+            );
+        }
+    }
+}
+
+fn print_beam_section_results(model: &Model2D, result: &AnalysisResult2D) -> Result<(), Box<dyn std::error::Error>> {
+    for element in model.elements() {
+        let Element2D::Beam(beam) = element else {
+            continue;
+        };
+
+        let node_ids = element.node_ids();
+        let first_node = model
+            .nodes()
+            .iter()
+            .find(|node| node.id() == node_ids[0])
+            .ok_or(FemError::UnknownId { entity: "node", id: node_ids[0] })?;
+        let second_node = model
+            .nodes()
+            .iter()
+            .find(|node| node.id() == node_ids[1])
+            .ok_or(FemError::UnknownId { entity: "node", id: node_ids[1] })?;
+        let length = beam.length(first_node, second_node)?;
+
+        println!("Beam {} section results:", element.id());
+
+        for position in [0.0, length / 2.0, length] {
+            let response = recover_beam_section_response(model, beam, result.displacements(), position)?;
+
+            match beam.section_height() {
+                Some(height) => println!(
+                    "  x = {:.12}: curvature = {:.12}, bending_moment = {:.12}, sigma(y=+h/2) = {:.12}, sigma(y=-h/2) = {:.12}",
+                    position,
+                    response.curvature(),
+                    response.bending_moment(),
+                    response.normal_stress(height / 2.0),
+                    response.normal_stress(-height / 2.0),
+                ),
+                None => println!(
+                    "  x = {:.12}: curvature = {:.12}, bending_moment = {:.12}, fiber_stress = unavailable (section height not provided)",
+                    position,
+                    response.curvature(),
+                    response.bending_moment(),
+                ),
+            }
+        }
     }
 
     Ok(())
@@ -316,8 +411,8 @@ fn parse_element_line(line: &str) -> Result<Element2D, String> {
                 .map_err(|error| error.to_string())
         }
         "beam" => {
-            if parts.len() != 6 {
-                return Err("expected: beam ID NODE_1 NODE_2 AREA I".to_owned());
+            if parts.len() != 7 {
+                return Err("expected: beam ID NODE_1 NODE_2 AREA I HEIGHT".to_owned());
             }
 
             let id = parse_usize(parts[1], "element ID")?;
@@ -325,10 +420,17 @@ fn parse_element_line(line: &str) -> Result<Element2D, String> {
             let second_node_id = parse_usize(parts[3], "second node ID")?;
             let cross_section_area = parse_f64(parts[4], "cross-sectional area")?;
             let second_moment_of_area = parse_f64(parts[5], "second moment of area")?;
+            let section_height = parse_f64(parts[6], "section height")?;
 
-            Beam2D::new(id, [first_node_id, second_node_id], cross_section_area, second_moment_of_area)
-                .map(Element2D::Beam)
-                .map_err(|error| error.to_string())
+            Beam2D::new_with_section_height(
+                id,
+                [first_node_id, second_node_id],
+                cross_section_area,
+                second_moment_of_area,
+                section_height,
+            )
+            .map(Element2D::Beam)
+            .map_err(|error| error.to_string())
         }
         "triangle" | "triangle_t3" | "t3" => {
             if parts.len() != 6 {
@@ -439,9 +541,11 @@ mod tests {
     #[test]
     fn parses_element_line() {
         let truss = parse_element_line("truss 10 1 2 0.01").expect("valid truss should be parsed");
+        let beam = parse_element_line("beam 15 1 2 0.02 0.001 0.1").expect("valid beam should be parsed");
         let triangle = parse_element_line("triangle 20 1 2 3 0.1").expect("valid triangle should be parsed");
 
         assert!(matches!(truss, Element2D::Truss(_)));
+        assert!(matches!(beam, Element2D::Beam(beam) if beam.section_height() == Some(0.1)));
         assert!(matches!(triangle, Element2D::TriangleT3(_)));
     }
 
@@ -449,6 +553,7 @@ mod tests {
     fn rejects_invalid_element_line() {
         assert!(parse_element_line("beam 10 1").is_err());
         assert!(parse_element_line("beam 10 1 2").is_err());
+        assert!(parse_element_line("beam 10 1 2 0.02 0.001").is_err());
         assert!(parse_element_line("truss 10 1 2").is_err());
         assert!(parse_element_line("triangle 10 1 2 3").is_err());
         assert!(parse_element_line("hexagon 10 1 2").is_err());
