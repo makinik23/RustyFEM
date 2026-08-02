@@ -24,6 +24,7 @@ pub struct Beam2D {
     node_ids: [usize; 2],
     cross_section_area: f64,
     second_moment_of_area: f64,
+    section_height: Option<f64>,
 }
 
 /// Triangle element in 2D space, defined by three nodes.
@@ -100,12 +101,45 @@ impl Truss2D {
     pub fn cross_section_area(&self) -> f64 {
         self.cross_section_area
     }
+
+    /// Returns the distance between the truss's two nodes.
+    pub fn length(&self, first_node: &Node2D, second_node: &Node2D) -> Result<f64, FemError> {
+        let dx = second_node.x() - first_node.x();
+        let dy = second_node.y() - first_node.y();
+        let length = (dx * dx + dy * dy).sqrt();
+
+        if !length.is_finite() || length == 0.0 {
+            return Err(FemError::DegenerateElement {
+                element_id: self.id,
+                element_type: "truss",
+                node_ids: self.node_ids.to_vec(),
+                measure_name: "length",
+                measure: length,
+            });
+        }
+
+        Ok(length)
+    }
 }
 
 impl Beam2D {
     /// Creates a new Beam2D element with the specified ID, node IDs, cross-sectional area, and second moment of area.
     pub fn new(
         id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64,
+    ) -> Result<Self, FemError> {
+        Self::new_internal(id, node_ids, cross_section_area, second_moment_of_area, None)
+    }
+
+    /// Creates a beam and stores its section height for fiber-stress recovery.
+    pub fn new_with_section_height(
+        id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64, section_height: f64,
+    ) -> Result<Self, FemError> {
+        Self::new_internal(id, node_ids, cross_section_area, second_moment_of_area, Some(section_height))
+    }
+
+    fn new_internal(
+        id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64,
+        section_height: Option<f64>,
     ) -> Result<Self, FemError> {
         if node_ids[0] == node_ids[1] {
             return Err(FemError::InvalidElementConnectivity { element_id: id, node_ids: node_ids.to_vec() });
@@ -131,7 +165,19 @@ impl Beam2D {
             });
         }
 
-        Ok(Self { id, node_ids, cross_section_area, second_moment_of_area })
+        if let Some(value) = section_height
+            && (!value.is_finite() || value <= 0.0)
+        {
+            return Err(FemError::InvalidElementProperty {
+                element_id: id,
+                element_type: "beam",
+                property: "section height",
+                value,
+                reason: "must be finite and strictly positive",
+            });
+        }
+
+        Ok(Self { id, node_ids, cross_section_area, second_moment_of_area, section_height })
     }
 
     /// Returns the cross-sectional area of the beam.
@@ -144,6 +190,12 @@ impl Beam2D {
     #[must_use]
     pub fn second_moment_of_area(&self) -> f64 {
         self.second_moment_of_area
+    }
+
+    /// Returns the section height if it was provided.
+    #[must_use]
+    pub fn section_height(&self) -> Option<f64> {
+        self.section_height
     }
 
     pub(crate) fn geometry(&self, first_node: &Node2D, second_node: &Node2D) -> Result<(f64, f64, f64), FemError> {
@@ -162,6 +214,11 @@ impl Beam2D {
         }
 
         Ok((length, dx / length, dy / length))
+    }
+
+    /// Returns the distance between the beam's two nodes.
+    pub fn length(&self, first_node: &Node2D, second_node: &Node2D) -> Result<f64, FemError> {
+        self.geometry(first_node, second_node).map(|(length, _, _)| length)
     }
 
     pub(crate) fn local_stiffness_matrix(&self, material: &Material2D, length: f64) -> [[f64; 6]; 6] {
@@ -690,6 +747,36 @@ mod tests {
                         value,
                         reason: "must be finite and strictly positive",
                     }) if value == second_moment_of_area || (value.is_nan() && second_moment_of_area.is_nan())
+                ),
+                "failed case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn creates_beam_with_section_height() {
+        let beam = Beam2D::new_with_section_height(20, [2, 3], 0.03, 0.001, 0.2).expect("valid beam should be created");
+
+        assert_eq!(beam.section_height(), Some(0.2));
+    }
+
+    #[test]
+    fn rejects_invalid_beam_section_height() {
+        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
+
+        for (name, section_height) in cases {
+            let result = Beam2D::new_with_section_height(20, [2, 3], 1.0, 1.0, section_height);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(FemError::InvalidElementProperty {
+                        element_id: 20,
+                        element_type: "beam",
+                        property: "section height",
+                        value,
+                        reason: "must be finite and strictly positive",
+                    }) if value == section_height || (value.is_nan() && section_height.is_nan())
                 ),
                 "failed case: {name}"
             );

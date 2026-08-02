@@ -63,4 +63,18 @@ pub enum FemError {
 
     #[error("displacement vector has invalid length: expected {expected}, got {actual}")]
     InvalidDisplacementVector { expected: usize, actual: usize },
+
+    #[error("interpolation length is invalid: {value}; must be finite and strictly positive")]
+    InvalidInterpolationLength { value: f64 },
+
+    #[error("interpolation coordinate is invalid: {coordinate}; expected a value in [0, {length}]")]
+    InvalidInterpolationCoordinate { coordinate: f64, length: f64 },
+
+    #[error(
+        "triangle natural coordinates are invalid: xi = {xi}, eta = {eta}; expected xi >= 0, eta >= 0, xi + eta <= 1"
+    )]
+    InvalidTriangleNaturalCoordinates { xi: f64, eta: f64 },
+
+    #[error("invalid interpolation position for {element_type}: expected {expected}")]
+    InvalidElementInterpolationPosition { element_type: &'static str, expected: &'static str },
 }
