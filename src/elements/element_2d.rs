@@ -146,15 +146,12 @@ impl Beam2D {
         self.second_moment_of_area
     }
 
-    /// Calculates the stiffness matrix of the beam element in global coordinates.
-    pub fn stiffness_matrix(
-        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D,
-    ) -> Result<[[f64; 6]; 6], FemError> {
+    pub(crate) fn geometry(&self, first_node: &Node2D, second_node: &Node2D) -> Result<(f64, f64, f64), FemError> {
         let dx = second_node.x() - first_node.x();
         let dy = second_node.y() - first_node.y();
         let length = (dx * dx + dy * dy).sqrt();
 
-        if length == 0.0 {
+        if !length.is_finite() || length == 0.0 {
             return Err(FemError::DegenerateElement {
                 element_id: self.id,
                 element_type: "beam",
@@ -164,27 +161,32 @@ impl Beam2D {
             });
         }
 
-        let c = dx / length;
-        let s = dy / length;
+        Ok((length, dx / length, dy / length))
+    }
 
-        let e = material.young_modulus();
-        let a = self.cross_section_area();
-        let i = self.second_moment_of_area();
+    pub(crate) fn local_stiffness_matrix(&self, material: &Material2D, length: f64) -> [[f64; 6]; 6] {
+        let ea_over_l = material.young_modulus() * self.cross_section_area() / length;
+        let twelve_ei_over_l3 = 12.0 * material.young_modulus() * self.second_moment_of_area() / length.powi(3);
+        let six_ei_over_l2 = 6.0 * material.young_modulus() * self.second_moment_of_area() / length.powi(2);
+        let four_ei_over_l = 4.0 * material.young_modulus() * self.second_moment_of_area() / length;
+        let two_ei_over_l = 2.0 * material.young_modulus() * self.second_moment_of_area() / length;
 
-        let ea_over_l = e * a / length;
-        let twelve_ei_over_l3 = 12.0 * e * i / length.powi(3);
-        let six_ei_over_l2 = 6.0 * e * i / length.powi(2);
-        let four_ei_over_l = 4.0 * e * i / length;
-        let two_ei_over_l = 2.0 * e * i / length;
-
-        let local_matrix = [
+        [
             [ea_over_l, 0.0, 0.0, -ea_over_l, 0.0, 0.0],
             [0.0, twelve_ei_over_l3, six_ei_over_l2, 0.0, -twelve_ei_over_l3, six_ei_over_l2],
             [0.0, six_ei_over_l2, four_ei_over_l, 0.0, -six_ei_over_l2, two_ei_over_l],
             [-ea_over_l, 0.0, 0.0, ea_over_l, 0.0, 0.0],
             [0.0, -twelve_ei_over_l3, -six_ei_over_l2, 0.0, twelve_ei_over_l3, -six_ei_over_l2],
             [0.0, six_ei_over_l2, two_ei_over_l, 0.0, -six_ei_over_l2, four_ei_over_l],
-        ];
+        ]
+    }
+
+    /// Calculates the stiffness matrix of the beam element in global coordinates.
+    pub fn stiffness_matrix(
+        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D,
+    ) -> Result<[[f64; 6]; 6], FemError> {
+        let (length, c, s) = self.geometry(first_node, second_node)?;
+        let local_matrix = self.local_stiffness_matrix(material, length);
 
         let transformation = [
             [c, s, 0.0, 0.0, 0.0, 0.0],
@@ -254,10 +256,9 @@ impl TriangleT3 {
         self.thickness
     }
 
-    /// Calculates the stiffness matrix using the linear plane-stress T3 formulation.
-    pub fn stiffness_matrix(
-        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D, third_node: &Node2D,
-    ) -> Result<[[f64; 6]; 6], FemError> {
+    pub(crate) fn strain_displacement_matrix(
+        &self, first_node: &Node2D, second_node: &Node2D, third_node: &Node2D,
+    ) -> Result<([[f64; 6]; 3], f64), FemError> {
         let x1 = first_node.x();
         let y1 = first_node.y();
         let x2 = second_node.x();
@@ -268,7 +269,7 @@ impl TriangleT3 {
         let twice_signed_area = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
         let area = 0.5 * twice_signed_area.abs();
 
-        if area == 0.0 {
+        if !area.is_finite() || area == 0.0 {
             return Err(FemError::DegenerateElement {
                 element_id: self.id,
                 element_type: "triangle_t3",
@@ -286,7 +287,7 @@ impl TriangleT3 {
         let c3 = x2 - x1;
         let inverse_twice_area = 1.0 / twice_signed_area;
 
-        let strain_displacement_matrix = [
+        let matrix = [
             [b1 * inverse_twice_area, 0.0, b2 * inverse_twice_area, 0.0, b3 * inverse_twice_area, 0.0],
             [0.0, c1 * inverse_twice_area, 0.0, c2 * inverse_twice_area, 0.0, c3 * inverse_twice_area],
             [
@@ -299,14 +300,27 @@ impl TriangleT3 {
             ],
         ];
 
-        let young_modulus = material.young_modulus();
-        let poisson_ratio = material.poisson_ratio();
-        let constitutive_factor = young_modulus / (1.0 - poisson_ratio * poisson_ratio);
-        let constitutive_matrix = [
-            [constitutive_factor, constitutive_factor * poisson_ratio, 0.0],
-            [constitutive_factor * poisson_ratio, constitutive_factor, 0.0],
-            [0.0, 0.0, constitutive_factor * (1.0 - poisson_ratio) / 2.0],
-        ];
+        Ok((matrix, area))
+    }
+
+    pub(crate) fn constitutive_matrix(material: &Material2D) -> [[f64; 3]; 3] {
+        let constitutive_factor =
+            material.young_modulus() / (1.0 - material.poisson_ratio() * material.poisson_ratio());
+
+        [
+            [constitutive_factor, constitutive_factor * material.poisson_ratio(), 0.0],
+            [constitutive_factor * material.poisson_ratio(), constitutive_factor, 0.0],
+            [0.0, 0.0, constitutive_factor * (1.0 - material.poisson_ratio()) / 2.0],
+        ]
+    }
+
+    /// Calculates the stiffness matrix using the linear plane-stress T3 formulation.
+    pub fn stiffness_matrix(
+        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D, third_node: &Node2D,
+    ) -> Result<[[f64; 6]; 6], FemError> {
+        let (strain_displacement_matrix, area) =
+            self.strain_displacement_matrix(first_node, second_node, third_node)?;
+        let constitutive_matrix = Self::constitutive_matrix(material);
 
         let constitutive_times_strain = multiply_3x3_by_3x6(&constitutive_matrix, &strain_displacement_matrix);
         let mut stiffness_matrix =

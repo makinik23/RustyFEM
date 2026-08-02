@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use clap::Parser;
 use rusty_fem::analysis::solver::{AnalysisResult2D, solve};
+use rusty_fem::analysis::{ElementResponse2D, recover_model_responses};
 use rusty_fem::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
 use rusty_fem::model::{
     AnalysisSpace, DisplacementConstraint2D, Dof2D, DofNumbering2D, Material2D, Model2D, NodalLoad2D, Node2D,
@@ -234,7 +235,46 @@ fn print_analysis_results(model: &Model2D, result: &AnalysisResult2D) -> Result<
         println!("  node {} {} = {:.12}", constraint.node_id(), constraint.dof().name(), result.reactions()[index]);
     }
 
+    println!("Element responses:");
+
+    for (element_id, response) in recover_model_responses(model, result.displacements())? {
+        print_element_response(element_id, response);
+    }
+
     Ok(())
+}
+
+fn print_element_response(element_id: usize, response: ElementResponse2D) {
+    match response {
+        ElementResponse2D::Truss(response) => {
+            println!(
+                "  element {element_id} truss: strain = {:.12}, stress = {:.12}, axial_force = {:.12}",
+                response.strain(),
+                response.stress(),
+                response.axial_force(),
+            );
+        }
+        ElementResponse2D::Beam(response) => {
+            println!(
+                "  element {element_id} beam: [N1, V1, M1, N2, V2, M2] = [{:.12}, {:.12}, {:.12}, {:.12}, {:.12}, {:.12}]",
+                response.first_axial_force(),
+                response.first_shear_force(),
+                response.first_bending_moment(),
+                response.second_axial_force(),
+                response.second_shear_force(),
+                response.second_bending_moment(),
+            );
+        }
+        ElementResponse2D::Triangle(response) => {
+            let strain = response.strain();
+            let stress = response.stress();
+
+            println!(
+                "  element {element_id} triangle: strain = [{:.12}, {:.12}, {:.12}], stress = [{:.12}, {:.12}, {:.12}]",
+                strain[0], strain[1], strain[2], stress[0], stress[1], stress[2],
+            );
+        }
+    }
 }
 
 fn parse_node_line(line: &str) -> Result<Node2D, String> {

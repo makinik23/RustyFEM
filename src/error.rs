@@ -60,4 +60,7 @@ pub enum FemError {
 
     #[error("the stiffness matrix is singular")]
     SingularSystem,
+
+    #[error("displacement vector has invalid length: expected {expected}, got {actual}")]
+    InvalidDisplacementVector { expected: usize, actual: usize },
 }
