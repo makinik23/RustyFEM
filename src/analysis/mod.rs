@@ -1,7 +1,9 @@
 pub mod assembly;
 pub mod boundary_conditions;
+pub mod iterative_solver;
 pub mod load_vector;
 pub mod solver;
+pub mod sparse;
 pub mod stress_recovery;
 
 pub use stress_recovery::{

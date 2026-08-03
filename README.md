@@ -34,6 +34,15 @@ Start a 2D interactive session with:
 cargo run -- --space 2d
 ```
 
+The dense LU solver is used by default. Use the sparse CSR solver with
+preconditioned Conjugate Gradient:
+
+```bash
+cargo run -- --space 2d --solver sparse \
+  --cg-tolerance 1e-10 \
+  --cg-max-iterations 1000
+```
+
 The program reads one material, then nodes, constraints, elements, and nodal
 loads. Enter `done` at the end of each group.
 
@@ -136,6 +145,40 @@ The dimensions in the first column are the number of rectangular cells in the
 | `16x8` | `-2.700297683096` | `-4.000000000000` | `32.4926%` |
 | `32x16` | `-3.579778463598` | `-4.000000000000` | `10.5055%` |
 | `64x32` | `-3.901091199391` | `-4.000000000000` | `2.4727%` |
+
+## Dense vs Sparse Solver Benchmark
+
+The same rectangular T3 cantilever models were solved with both the dense LU
+solver and the sparse CSR solver using preconditioned Conjugate Gradient with
+the Jacobi preconditioner. The measurements include stiffness assembly,
+boundary-condition application, and the complete linear solve.
+
+Benchmark command:
+
+```bash
+cargo bench --bench solver_benchmark -- \
+  --sample-size 100 \
+  --measurement-time 5 \
+  --warm-up-time 5
+```
+
+Results were collected with Criterion in release mode. The values below are
+the median time reported by Criterion on the benchmark machine.
+
+| Mesh | Dense LU | Sparse PCG + Jacobi | Relative speed |
+| --- | ---: | ---: | ---: |
+| `4x2` | `11.777 us` | `25.990 us` | `0.45x` |
+| `8x4` | `85.919 us` | `147.440 us` | `0.58x` |
+| `16x8` | `2.1291 ms` | `977.280 us` | `2.18x` |
+| `32x16` | `90.172 ms` | `8.0671 ms` | `11.18x` |
+| `64x32` | `6.5227 s` | `79.985 ms` | `81.55x` |
+
+The sparse solver is slower for small systems because COO/CSR assembly and
+iterative-solver setup add fixed overhead. Starting at `16x8`, the reduced
+storage and sparse matrix-vector products outweigh that overhead. For the
+`64x32` mesh, the sparse solver is approximately 82 times faster than dense
+LU. The largest dense measurements exceeded Criterion's five-second target
+budget, but all configured samples were collected.
 
 ## Development Checks
 

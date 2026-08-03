@@ -2,6 +2,7 @@
 
 use nalgebra::DMatrix;
 
+use crate::analysis::sparse::{CooMatrix, CsrMatrix};
 use crate::error::FemError;
 use crate::model::{DofNumbering2D, Model2D};
 
@@ -29,13 +30,40 @@ pub fn assemble_stiffness_matrix(model: &Model2D) -> Result<DMatrix<f64>, FemErr
     Ok(global_matrix)
 }
 
+/// Assembles the global stiffness matrix in sparse CSR format.
+pub fn assemble_sparse_stiffness_matrix(model: &Model2D) -> Result<CsrMatrix, FemError> {
+    let material = model.material().ok_or(FemError::MissingMaterial)?;
+
+    let numbering = DofNumbering2D::from_model(model)?;
+    let size = numbering.count();
+
+    // COO is convenient during assembly because it accepts duplicate entries.
+    let mut global_matrix = CooMatrix::new(size, size);
+
+    for element in model.elements() {
+        let element_matrix = element.stiffness_matrix(material, model.nodes())?;
+        let indices = numbering.element_dof_indices(element)?;
+
+        for (local_row, &global_row) in indices.iter().enumerate() {
+            for (local_column, &global_column) in indices.iter().enumerate() {
+                let value = element_matrix[(local_row, local_column)];
+
+                global_matrix.push(global_row, global_column, value)?;
+            }
+        }
+    }
+
+    // This sums duplicate entries and creates the efficient CSR structure.
+    Ok(global_matrix.into_csr())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::assemble_stiffness_matrix;
+    use super::{assemble_sparse_stiffness_matrix, assemble_stiffness_matrix};
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{Material2D, Model2D, Node2D};
-    use nalgebra::DMatrix;
+    use nalgebra::{DMatrix, DVector};
 
     #[test]
     fn rejects_assembly_without_material() {
@@ -143,6 +171,46 @@ mod tests {
                     expected[(row, column)]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sparse_and_dense_assembly_produce_the_same_result() {
+        let mut model = Model2D::new();
+
+        let material = Material2D::new(2.0, 0.3, 1.0).expect("valid material should be created");
+
+        model.set_material(material);
+
+        for (id, x) in [(1, 0.0), (2, 1.0), (3, 2.0)] {
+            model
+                .add_node(Node2D::new(id, x, 0.0).expect("valid node should be created"))
+                .expect("node should be added");
+        }
+
+        let first_truss = Truss2D::new(10, [1, 2], 3.0).expect("valid truss should be created");
+
+        let second_truss = Truss2D::new(20, [2, 3], 3.0).expect("valid truss should be created");
+
+        model.add_element(Element2D::Truss(first_truss)).expect("first element should be added");
+
+        model.add_element(Element2D::Truss(second_truss)).expect("second element should be added");
+
+        let dense = assemble_stiffness_matrix(&model).expect("dense matrix should be assembled");
+
+        let sparse = assemble_sparse_stiffness_matrix(&model).expect("sparse matrix should be assembled");
+
+        let x = DVector::from_vec(vec![1.0; dense.ncols()]);
+        let dense_result = &dense * &x;
+
+        let mut sparse_result = vec![0.0; sparse.nrows()];
+
+        sparse
+            .mul_vector(x.as_slice(), &mut sparse_result)
+            .expect("sparse matrix-vector multiplication should succeed");
+
+        for (actual, expected) in sparse_result.iter().zip(dense_result.iter()) {
+            assert!((actual - expected).abs() < 1e-12, "different result: sparse = {actual}, dense = {expected}");
         }
     }
 }
