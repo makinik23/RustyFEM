@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rusty_fem::FemError;
-use rusty_fem::analysis::solver::{AnalysisResult2D, solve};
+use rusty_fem::analysis::iterative_solver::{CgOptions, CgTerminationReason};
+use rusty_fem::analysis::solver::{AnalysisResult2D, solve, solve_sparse_with_options};
 use rusty_fem::analysis::{ElementResponse2D, recover_beam_section_response, recover_model_responses};
 use rusty_fem::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
 use rusty_fem::model::{
@@ -14,6 +15,28 @@ use rusty_fem::model::{
 struct Cli {
     #[arg(long, value_name = "2D|3D")]
     space: Option<AnalysisSpace>,
+
+    /// Selects the linear solver used for the analysis.
+    #[arg(long, value_enum, default_value_t = SolverKind::Dense)]
+    solver: SolverKind,
+
+    /// Relative residual tolerance used by the sparse iterative solver.
+    #[arg(long, default_value_t = 1e-10, value_name = "TOLERANCE")]
+    cg_tolerance: f64,
+
+    /// Maximum number of CG iterations used by the sparse solver.
+    #[arg(long, default_value_t = 1_000, value_name = "ITERATIONS")]
+    cg_max_iterations: usize,
+}
+
+/// Selects between the reference dense solver and the sparse iterative solver.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SolverKind {
+    /// Solves the system with a dense LU decomposition.
+    Dense,
+
+    /// Solves the system with CSR storage and Conjugate Gradient.
+    Sparse,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,7 +74,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loads: {}", model.loads().len());
 
     println!();
-    match solve(&model) {
+    let result = match cli.solver {
+        SolverKind::Dense => solve(&model),
+        SolverKind::Sparse => solve_sparse_with_options(
+            &model,
+            CgOptions { max_iterations: cli.cg_max_iterations, tolerance: cli.cg_tolerance, ..CgOptions::default() },
+        ),
+    };
+
+    match result {
         Ok(result) => print_analysis_results(&model, &result)?,
         Err(error) => println!("Could not solve model: {error}"),
     }
@@ -217,6 +248,20 @@ fn read_loads(model: &mut Model2D) -> io::Result<()> {
 fn print_analysis_results(model: &Model2D, result: &AnalysisResult2D) -> Result<(), Box<dyn std::error::Error>> {
     let numbering = DofNumbering2D::from_model(model)?;
     let ordered_dofs = [Dof2D::Ux, Dof2D::Uy, Dof2D::Rz];
+
+    if let Some(report) = result.solver_report() {
+        let status = match report.termination_reason {
+            CgTerminationReason::Converged => "converged",
+            CgTerminationReason::MaxIterations => "maximum iterations reached",
+            CgTerminationReason::Stagnated => "stagnated",
+        };
+
+        println!("Solver report:");
+        println!("  iterations: {}", report.iterations);
+        println!("  residual norm: {:.6e}", report.residual_norm);
+        println!("  relative residual norm: {:.6e}", report.relative_residual_norm);
+        println!("  status: {status}");
+    }
 
     println!("Displacements:");
 

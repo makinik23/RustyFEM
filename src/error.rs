@@ -77,4 +77,25 @@ pub enum FemError {
 
     #[error("invalid interpolation position for {element_type}: expected {expected}")]
     InvalidElementInterpolationPosition { element_type: &'static str, expected: &'static str },
+
+    #[error("vector {vector} has invalid length: expected {expected}, got {actual}")]
+    InvalidVectorLength { vector: &'static str, expected: usize, actual: usize },
+
+    #[error("conjugate gradient tolerance must be finite and positive: {value}")]
+    InvalidSolverTolerance { value: f64 },
+
+    #[error("stagnation tolerance must be finite and non-negative: {value}")]
+    InvalidStagnationTolerance { value: f64 },
+
+    #[error("conjugate gradient method broke down")]
+    ConjugateGradientBreakdown,
+
+    #[error("invalid Jacobi preconditioner diagonal at index {index}: {value}")]
+    InvalidPreconditionerDiagonal { index: usize, value: f64 },
+
+    #[error("iterative solver did not converge after {iterations} iterations; residual norm = {residual_norm}")]
+    IterativeSolverDidNotConverge { iterations: usize, residual_norm: f64 },
+
+    #[error("iterative solver stagnated after {iterations} iterations; residual norm = {residual_norm}")]
+    IterativeSolverStagnated { iterations: usize, residual_norm: f64 },
 }
