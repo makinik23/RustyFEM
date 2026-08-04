@@ -6,6 +6,7 @@ pub mod load;
 pub mod material;
 pub mod model_2d;
 pub mod node;
+pub mod mesh;
 
 pub use analysis_space::AnalysisSpace;
 pub use constraint::DisplacementConstraint2D;
@@ -15,3 +16,4 @@ pub use load::NodalLoad2D;
 pub use material::Material2D;
 pub use model_2d::Model2D;
 pub use node::Node2D;
+pub use mesh::Mesh2D;

@@ -4,15 +4,15 @@ use super::constraint::DisplacementConstraint2D;
 use super::load::NodalLoad2D;
 use super::material::Material2D;
 use super::node::Node2D;
+use super::Mesh2D;
 use crate::elements::Element2D;
 use crate::error::FemError;
 
 /// Represents a 2D model consisting of nodes and displacement constraints.
 #[derive(Default)]
 pub struct Model2D {
-    nodes: Vec<Node2D>,
+    mesh: Mesh2D,
     constraints: Vec<DisplacementConstraint2D>,
-    elements: Vec<Element2D>,
     material: Option<Material2D>,
     loads: Vec<NodalLoad2D>,
 }
@@ -25,18 +25,18 @@ impl Model2D {
 
     /// Adds a node to the model. Returns an error if a node with the same ID already exists.
     pub fn add_node(&mut self, node: Node2D) -> Result<(), FemError> {
-        if self.nodes.iter().any(|existing| existing.id() == node.id()) {
+        if self.mesh.contains_node_id(node.id()) {
             return Err(FemError::DuplicateId { entity: "node", id: node.id() });
         }
 
-        self.nodes.push(node);
+        self.mesh.push_node(node);
 
         Ok(())
     }
 
     /// Adds a displacement constraint to the model. Returns an error if the node ID associated with the constraint does not exist in the model.
     pub fn add_constraint(&mut self, constraint: DisplacementConstraint2D) -> Result<(), FemError> {
-        if !self.nodes.iter().any(|node| node.id() == constraint.node_id()) {
+        if !self.mesh.contains_node_id(constraint.node_id()) {
             return Err(FemError::UnknownId { entity: "node", id: constraint.node_id() });
         }
 
@@ -48,7 +48,7 @@ impl Model2D {
     /// Adds an element to the model. Returns an error if an element with the same ID already exists
     /// or if any of the node IDs associated with the element do not exist in the model.
     pub fn add_element(&mut self, element: Element2D) -> Result<(), FemError> {
-        if self.elements.iter().any(|existing| existing.id() == element.id()) {
+        if self.mesh.contains_element_id(element.id()) {
             return Err(FemError::DuplicateId { entity: "element", id: element.id() });
         }
 
@@ -58,7 +58,7 @@ impl Model2D {
 
         self.validate_element_geometry(&element)?;
 
-        self.elements.push(element);
+        self.mesh.push_element(element);
 
         Ok(())
     }
@@ -70,7 +70,7 @@ impl Model2D {
 
     /// Finds a node in the model by its ID. Returns a reference to the node if found, or an error if the node ID does not exist in the model.
     fn find_node(&self, node_id: usize) -> Result<&Node2D, FemError> {
-        self.nodes.iter().find(|node| node.id() == node_id).ok_or(FemError::UnknownId { entity: "node", id: node_id })
+        self.mesh.node(node_id).ok_or(FemError::UnknownId { entity: "node", id: node_id })
     }
 
     /// Validates the geometry of an element. Returns an error if the element is degenerate (e.g., zero length for trusses and beams, or zero area for triangles).
@@ -124,7 +124,7 @@ impl Model2D {
     }
 
     pub fn add_load(&mut self, load: NodalLoad2D) -> Result<(), FemError> {
-        if !self.nodes.iter().any(|node| node.id() == load.node_id()) {
+        if !self.mesh.contains_node_id(load.node_id()) {
             return Err(FemError::UnknownId { entity: "node", id: load.node_id() });
         }
 
@@ -136,7 +136,7 @@ impl Model2D {
     /// Returns a slice of all nodes in the model.
     #[must_use]
     pub fn nodes(&self) -> &[Node2D] {
-        &self.nodes
+        self.mesh.nodes()
     }
 
     /// Returns a slice of all displacement constraints in the model.
@@ -148,7 +148,7 @@ impl Model2D {
     /// Returns a slice of all elements in the model.
     #[must_use]
     pub fn elements(&self) -> &[Element2D] {
-        &self.elements
+        self.mesh.elements()
     }
 
     /// Returns the material properties of the model.
