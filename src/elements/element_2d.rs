@@ -2,7 +2,7 @@
 
 use super::Interpolation;
 use crate::error::FemError;
-use crate::model::{Dof2D, Material2D, Node2D};
+use crate::model::{BeamSection2D, Dof2D, Material2D, Node2D, PlaneStressSection2D, Section2D, TrussSection2D};
 use nalgebra::DMatrix;
 
 const TRANSLATIONAL_DOFS: &[Dof2D] = &[Dof2D::Ux, Dof2D::Uy];
@@ -14,7 +14,8 @@ const FRAME_DOFS: &[Dof2D] = &[Dof2D::Ux, Dof2D::Uy, Dof2D::Rz];
 pub struct Truss2D {
     id: usize,
     node_ids: [usize; 2],
-    cross_section_area: f64,
+    material_id: usize,
+    section_id: usize,
 }
 
 /// Beam element in 2D space, defined by two nodes.
@@ -22,9 +23,8 @@ pub struct Truss2D {
 pub struct Beam2D {
     id: usize,
     node_ids: [usize; 2],
-    cross_section_area: f64,
-    second_moment_of_area: f64,
-    section_height: Option<f64>,
+    material_id: usize,
+    section_id: usize,
 }
 
 /// Triangle element in 2D space, defined by three nodes.
@@ -32,7 +32,8 @@ pub struct Beam2D {
 pub struct TriangleT3 {
     id: usize,
     node_ids: [usize; 3],
-    thickness: f64,
+    material_id: usize,
+    section_id: usize,
 }
 
 /// Enum representing different types of 2D elements used in finite element analysis.
@@ -44,28 +45,18 @@ pub enum Element2D {
 }
 
 impl Truss2D {
-    /// Creates a new Truss2D element with the specified ID, node IDs, and cross-sectional area.
-    pub fn new(id: usize, node_ids: [usize; 2], cross_section_area: f64) -> Result<Self, FemError> {
+    /// Creates a new Truss2D element with the specified ID, node IDs, material ID, and section ID.
+    pub fn new(id: usize, node_ids: [usize; 2], material_id: usize, section_id: usize) -> Result<Self, FemError> {
         if node_ids[0] == node_ids[1] {
             return Err(FemError::InvalidElementConnectivity { element_id: id, node_ids: node_ids.to_vec() });
         }
 
-        if !cross_section_area.is_finite() || cross_section_area <= 0.0 {
-            return Err(FemError::InvalidElementProperty {
-                element_id: id,
-                element_type: "truss",
-                property: "cross-sectional area",
-                value: cross_section_area,
-                reason: "must be finite and strictly positive",
-            });
-        }
-
-        Ok(Self { id, node_ids, cross_section_area })
+        Ok(Self { id, node_ids, material_id, section_id })
     }
 
     /// Calculates the stiffness matrix for the truss element based on the provided material properties and node coordinates.
     pub fn stiffness_matrix(
-        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D,
+        &self, material: &Material2D, section: &TrussSection2D, first_node: &Node2D, second_node: &Node2D,
     ) -> Result<[[f64; 4]; 4], FemError> {
         let dx = second_node.x() - first_node.x();
         let dy = second_node.y() - first_node.y();
@@ -84,7 +75,7 @@ impl Truss2D {
         let c = dx / length;
         let s = dy / length;
 
-        let factor = material.young_modulus() * self.cross_section_area() / length;
+        let factor = material.young_modulus() * section.cross_section_area() / length;
 
         let matrix = [
             [factor * c * c, factor * c * s, -factor * c * c, -factor * c * s],
@@ -96,10 +87,16 @@ impl Truss2D {
         Ok(matrix)
     }
 
-    /// Returns the cross-sectional area of the truss.
+    /// Returns the material ID used by this element.
     #[must_use]
-    pub fn cross_section_area(&self) -> f64 {
-        self.cross_section_area
+    pub fn material_id(&self) -> usize {
+        self.material_id
+    }
+
+    /// Returns the section ID used by this element.
+    #[must_use]
+    pub fn section_id(&self) -> usize {
+        self.section_id
     }
 
     /// Returns the distance between the truss's two nodes.
@@ -123,79 +120,25 @@ impl Truss2D {
 }
 
 impl Beam2D {
-    /// Creates a new Beam2D element with the specified ID, node IDs, cross-sectional area, and second moment of area.
-    pub fn new(
-        id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64,
-    ) -> Result<Self, FemError> {
-        Self::new_internal(id, node_ids, cross_section_area, second_moment_of_area, None)
-    }
-
-    /// Creates a beam and stores its section height for fiber-stress recovery.
-    pub fn new_with_section_height(
-        id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64, section_height: f64,
-    ) -> Result<Self, FemError> {
-        Self::new_internal(id, node_ids, cross_section_area, second_moment_of_area, Some(section_height))
-    }
-
-    fn new_internal(
-        id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64,
-        section_height: Option<f64>,
-    ) -> Result<Self, FemError> {
+    /// Creates a new Beam2D element with the specified ID, node IDs, material ID, and section ID.
+    pub fn new(id: usize, node_ids: [usize; 2], material_id: usize, section_id: usize) -> Result<Self, FemError> {
         if node_ids[0] == node_ids[1] {
             return Err(FemError::InvalidElementConnectivity { element_id: id, node_ids: node_ids.to_vec() });
         }
 
-        if !cross_section_area.is_finite() || cross_section_area <= 0.0 {
-            return Err(FemError::InvalidElementProperty {
-                element_id: id,
-                element_type: "beam",
-                property: "cross-sectional area",
-                value: cross_section_area,
-                reason: "must be finite and strictly positive",
-            });
-        }
-
-        if !second_moment_of_area.is_finite() || second_moment_of_area <= 0.0 {
-            return Err(FemError::InvalidElementProperty {
-                element_id: id,
-                element_type: "beam",
-                property: "second moment of area",
-                value: second_moment_of_area,
-                reason: "must be finite and strictly positive",
-            });
-        }
-
-        if let Some(value) = section_height
-            && (!value.is_finite() || value <= 0.0)
-        {
-            return Err(FemError::InvalidElementProperty {
-                element_id: id,
-                element_type: "beam",
-                property: "section height",
-                value,
-                reason: "must be finite and strictly positive",
-            });
-        }
-
-        Ok(Self { id, node_ids, cross_section_area, second_moment_of_area, section_height })
+        Ok(Self { id, node_ids, material_id, section_id })
     }
 
-    /// Returns the cross-sectional area of the beam.
+    /// Returns the material ID used by this element.
     #[must_use]
-    pub fn cross_section_area(&self) -> f64 {
-        self.cross_section_area
+    pub fn material_id(&self) -> usize {
+        self.material_id
     }
 
-    /// Returns the second moment of area of the beam.
+    /// Returns the section ID used by this element.
     #[must_use]
-    pub fn second_moment_of_area(&self) -> f64 {
-        self.second_moment_of_area
-    }
-
-    /// Returns the section height if it was provided.
-    #[must_use]
-    pub fn section_height(&self) -> Option<f64> {
-        self.section_height
+    pub fn section_id(&self) -> usize {
+        self.section_id
     }
 
     pub(crate) fn geometry(&self, first_node: &Node2D, second_node: &Node2D) -> Result<(f64, f64, f64), FemError> {
@@ -221,12 +164,14 @@ impl Beam2D {
         self.geometry(first_node, second_node).map(|(length, _, _)| length)
     }
 
-    pub(crate) fn local_stiffness_matrix(&self, material: &Material2D, length: f64) -> [[f64; 6]; 6] {
-        let ea_over_l = material.young_modulus() * self.cross_section_area() / length;
-        let twelve_ei_over_l3 = 12.0 * material.young_modulus() * self.second_moment_of_area() / length.powi(3);
-        let six_ei_over_l2 = 6.0 * material.young_modulus() * self.second_moment_of_area() / length.powi(2);
-        let four_ei_over_l = 4.0 * material.young_modulus() * self.second_moment_of_area() / length;
-        let two_ei_over_l = 2.0 * material.young_modulus() * self.second_moment_of_area() / length;
+    pub(crate) fn local_stiffness_matrix(
+        &self, material: &Material2D, section: &BeamSection2D, length: f64,
+    ) -> [[f64; 6]; 6] {
+        let ea_over_l = material.young_modulus() * section.cross_section_area() / length;
+        let twelve_ei_over_l3 = 12.0 * material.young_modulus() * section.second_moment_of_area() / length.powi(3);
+        let six_ei_over_l2 = 6.0 * material.young_modulus() * section.second_moment_of_area() / length.powi(2);
+        let four_ei_over_l = 4.0 * material.young_modulus() * section.second_moment_of_area() / length;
+        let two_ei_over_l = 2.0 * material.young_modulus() * section.second_moment_of_area() / length;
 
         [
             [ea_over_l, 0.0, 0.0, -ea_over_l, 0.0, 0.0],
@@ -240,10 +185,10 @@ impl Beam2D {
 
     /// Calculates the stiffness matrix of the beam element in global coordinates.
     pub fn stiffness_matrix(
-        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D,
+        &self, material: &Material2D, section: &BeamSection2D, first_node: &Node2D, second_node: &Node2D,
     ) -> Result<[[f64; 6]; 6], FemError> {
         let (length, c, s) = self.geometry(first_node, second_node)?;
-        let local_matrix = self.local_stiffness_matrix(material, length);
+        let local_matrix = self.local_stiffness_matrix(material, section, length);
 
         let transformation = [
             [c, s, 0.0, 0.0, 0.0, 0.0],
@@ -289,28 +234,24 @@ fn multiply_6x6(left: &[[f64; 6]; 6], right: &[[f64; 6]; 6]) -> [[f64; 6]; 6] {
 
 impl TriangleT3 {
     /// Creates a three-node triangular element for a plane-stress analysis.
-    pub fn new(id: usize, node_ids: [usize; 3], thickness: f64) -> Result<Self, FemError> {
+    pub fn new(id: usize, node_ids: [usize; 3], material_id: usize, section_id: usize) -> Result<Self, FemError> {
         if node_ids[0] == node_ids[1] || node_ids[0] == node_ids[2] || node_ids[1] == node_ids[2] {
             return Err(FemError::InvalidElementConnectivity { element_id: id, node_ids: node_ids.to_vec() });
         }
 
-        if !thickness.is_finite() || thickness <= 0.0 {
-            return Err(FemError::InvalidElementProperty {
-                element_id: id,
-                element_type: "triangle_t3",
-                property: "thickness",
-                value: thickness,
-                reason: "must be finite and strictly positive",
-            });
-        }
-
-        Ok(Self { id, node_ids, thickness })
+        Ok(Self { id, node_ids, material_id, section_id })
     }
 
-    /// Returns the thickness of the triangular element.
+    /// Returns the material ID used by this element.
     #[must_use]
-    pub fn thickness(&self) -> f64 {
-        self.thickness
+    pub fn material_id(&self) -> usize {
+        self.material_id
+    }
+
+    /// Returns the section ID used by this element.
+    #[must_use]
+    pub fn section_id(&self) -> usize {
+        self.section_id
     }
 
     pub(crate) fn strain_displacement_matrix(
@@ -373,7 +314,8 @@ impl TriangleT3 {
 
     /// Calculates the stiffness matrix using the linear plane-stress T3 formulation.
     pub fn stiffness_matrix(
-        &self, material: &Material2D, first_node: &Node2D, second_node: &Node2D, third_node: &Node2D,
+        &self, material: &Material2D, section: &PlaneStressSection2D, first_node: &Node2D, second_node: &Node2D,
+        third_node: &Node2D,
     ) -> Result<[[f64; 6]; 6], FemError> {
         let (strain_displacement_matrix, area) =
             self.strain_displacement_matrix(first_node, second_node, third_node)?;
@@ -382,7 +324,7 @@ impl TriangleT3 {
         let constitutive_times_strain = multiply_3x3_by_3x6(&constitutive_matrix, &strain_displacement_matrix);
         let mut stiffness_matrix =
             multiply_transpose_3x6_by_3x6(&strain_displacement_matrix, &constitutive_times_strain);
-        let scale = self.thickness * area;
+        let scale = section.thickness() * area;
 
         for row in &mut stiffness_matrix {
             for value in row {
@@ -441,6 +383,26 @@ impl Element2D {
         }
     }
 
+    /// Returns the section ID referenced by this element.
+    #[must_use]
+    pub fn section_id(&self) -> usize {
+        match self {
+            Self::Truss(element) => element.section_id(),
+            Self::Beam(element) => element.section_id(),
+            Self::TriangleT3(element) => element.section_id(),
+        }
+    }
+
+    /// Returns the material ID referenced by this element.
+    #[must_use]
+    pub fn material_id(&self) -> usize {
+        match self {
+            Self::Truss(element) => element.material_id(),
+            Self::Beam(element) => element.material_id(),
+            Self::TriangleT3(element) => element.material_id(),
+        }
+    }
+
     /// Returns the interpolation type used for the element.
     pub fn interpolation(&self) -> Interpolation {
         match self {
@@ -468,7 +430,9 @@ impl Element2D {
     ///
     /// The nodes slice is used to resolve the element's node IDs. The returned
     /// dynamic matrix has the same row and column order as the element DOFs.
-    pub fn stiffness_matrix(&self, material: &Material2D, nodes: &[Node2D]) -> Result<DMatrix<f64>, FemError> {
+    pub fn stiffness_matrix(
+        &self, material: &Material2D, section: &Section2D, nodes: &[Node2D],
+    ) -> Result<DMatrix<f64>, FemError> {
         let element_nodes = self
             .node_ids()
             .iter()
@@ -480,42 +444,57 @@ impl Element2D {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        match self {
-            Self::Truss(element) => {
-                let matrix = element.stiffness_matrix(material, element_nodes[0], element_nodes[1])?;
+        match (self, section) {
+            (Self::Truss(element), Section2D::Truss(section)) => {
+                let matrix = element.stiffness_matrix(material, section, element_nodes[0], element_nodes[1])?;
 
                 Ok(dynamic_matrix_from_array(matrix))
             }
-            Self::Beam(element) => {
-                let matrix = element.stiffness_matrix(material, element_nodes[0], element_nodes[1])?;
+            (Self::Beam(element), Section2D::Beam(section)) => {
+                let matrix = element.stiffness_matrix(material, section, element_nodes[0], element_nodes[1])?;
 
                 Ok(dynamic_matrix_from_array(matrix))
             }
-            Self::TriangleT3(element) => {
-                let matrix =
-                    element.stiffness_matrix(material, element_nodes[0], element_nodes[1], element_nodes[2])?;
+            (Self::TriangleT3(element), Section2D::PlaneStress(section)) => {
+                let matrix = element.stiffness_matrix(
+                    material,
+                    section,
+                    element_nodes[0],
+                    element_nodes[1],
+                    element_nodes[2],
+                )?;
 
                 Ok(dynamic_matrix_from_array(matrix))
             }
+            _ => Err(FemError::InvalidSectionType {
+                section_id: self.section_id(),
+                expected: self.expected_section_type(),
+                actual: section.section_type(),
+            }),
         }
     }
 
-    /// Returns the cross-sectional area if the element is a truss. TODO
-    #[must_use]
-    pub fn cross_section_area(&self) -> Option<f64> {
-        match self {
-            Self::Truss(element) => Some(element.cross_section_area()),
-            Self::Beam(element) => Some(element.cross_section_area()),
-            _ => None,
+    /// Checks that a section has the expected type for this element.
+    pub fn validate_section(&self, section: &Section2D) -> Result<(), FemError> {
+        match (self, section) {
+            (Self::Truss(_), Section2D::Truss(_))
+            | (Self::Beam(_), Section2D::Beam(_))
+            | (Self::TriangleT3(_), Section2D::PlaneStress(_)) => Ok(()),
+            _ => Err(FemError::InvalidSectionType {
+                section_id: self.section_id(),
+                expected: self.expected_section_type(),
+                actual: section.section_type(),
+            }),
         }
     }
 
-    /// Returns the second moment of area if the element is a beam. TODO
+    /// Returns the expected section type name for diagnostics.
     #[must_use]
-    pub fn second_moment_of_area(&self) -> Option<f64> {
+    pub fn expected_section_type(&self) -> &'static str {
         match self {
-            Self::Beam(element) => Some(element.second_moment_of_area()),
-            _ => None,
+            Self::Truss(_) => "truss",
+            Self::Beam(_) => "beam",
+            Self::TriangleT3(_) => "plane_stress",
         }
     }
 }
@@ -533,20 +512,29 @@ mod tests {
     use super::{Beam2D, Element2D, TriangleT3, Truss2D, dynamic_matrix_from_array};
     use crate::elements::interpolation::Interpolation;
     use crate::error::FemError;
-    use crate::model::{Dof2D, Material2D, Node2D};
+    use crate::model::{BeamSection2D, Dof2D, Material2D, Node2D, PlaneStressSection2D, Section2D, TrussSection2D};
 
     #[test]
     fn creates_valid_elements() {
         let cases = [
-            ("truss", Truss2D::new(10, [1, 2], 1.0).map(Element2D::Truss), 10, vec![1, 2]),
-            ("beam", Beam2D::new(20, [2, 3], 1.0, 1.0).map(Element2D::Beam), 20, vec![2, 3]),
-            ("triangle", TriangleT3::new(30, [3, 4, 5], 1.0).map(Element2D::TriangleT3), 30, vec![3, 4, 5]),
+            ("truss", Truss2D::new(10, [1, 2], 90, 100).map(Element2D::Truss), 10, 90, 100, vec![1, 2]),
+            ("beam", Beam2D::new(20, [2, 3], 91, 200).map(Element2D::Beam), 20, 91, 200, vec![2, 3]),
+            (
+                "triangle",
+                TriangleT3::new(30, [3, 4, 5], 92, 300).map(Element2D::TriangleT3),
+                30,
+                92,
+                300,
+                vec![3, 4, 5],
+            ),
         ];
 
-        for (name, result, expected_element_id, expected_node_ids) in cases {
+        for (name, result, expected_element_id, expected_material_id, expected_section_id, expected_node_ids) in cases {
             let element = result.expect("valid element should be created");
 
             assert_eq!(element.id(), expected_element_id, "failed case: {name}");
+            assert_eq!(element.material_id(), expected_material_id, "failed case: {name}");
+            assert_eq!(element.section_id(), expected_section_id, "failed case: {name}");
 
             assert_eq!(element.node_ids(), expected_node_ids.as_slice(), "failed case: {name}");
         }
@@ -555,9 +543,9 @@ mod tests {
     #[test]
     fn rejects_elements_with_repeated_nodes() {
         let cases = [
-            ("truss", Truss2D::new(10, [1, 1], 1.0).map(Element2D::Truss), 10, vec![1, 1]),
-            ("beam", Beam2D::new(20, [2, 2], 1.0, 1.0).map(Element2D::Beam), 20, vec![2, 2]),
-            ("triangle", TriangleT3::new(30, [3, 4, 3], 1.0).map(Element2D::TriangleT3), 30, vec![3, 4, 3]),
+            ("truss", Truss2D::new(10, [1, 1], 0, 100).map(Element2D::Truss), 10, vec![1, 1]),
+            ("beam", Beam2D::new(20, [2, 2], 0, 200).map(Element2D::Beam), 20, vec![2, 2]),
+            ("triangle", TriangleT3::new(30, [3, 4, 3], 0, 300).map(Element2D::TriangleT3), 30, vec![3, 4, 3]),
         ];
 
         for (name, result, expected_element_id, expected_node_ids) in cases {
@@ -582,17 +570,19 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created")),
+                Element2D::Truss(Truss2D::new(10, [1, 2], 0, 100).expect("valid truss should be created")),
                 Interpolation::LinearLagrange,
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(20, [2, 3], 1.0, 1.0).expect("valid beam should be created")),
+                Element2D::Beam(Beam2D::new(20, [2, 3], 0, 200).expect("valid beam should be created")),
                 Interpolation::CubicHermite,
             ),
             (
                 "triangle",
-                Element2D::TriangleT3(TriangleT3::new(30, [3, 4, 5], 1.0).expect("valid triangle should be created")),
+                Element2D::TriangleT3(
+                    TriangleT3::new(30, [3, 4, 5], 0, 300).expect("valid triangle should be created"),
+                ),
                 Interpolation::LinearTriangleT3,
             ),
         ];
@@ -607,19 +597,21 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created")),
+                Element2D::Truss(Truss2D::new(10, [1, 2], 0, 100).expect("valid truss should be created")),
                 vec![Dof2D::Ux, Dof2D::Uy],
                 4,
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(20, [2, 3], 1.0, 1.0).expect("valid beam should be created")),
+                Element2D::Beam(Beam2D::new(20, [2, 3], 0, 200).expect("valid beam should be created")),
                 vec![Dof2D::Ux, Dof2D::Uy, Dof2D::Rz],
                 6,
             ),
             (
                 "triangle",
-                Element2D::TriangleT3(TriangleT3::new(30, [3, 4, 5], 1.0).expect("valid triangle should be created")),
+                Element2D::TriangleT3(
+                    TriangleT3::new(30, [3, 4, 5], 0, 300).expect("valid triangle should be created"),
+                ),
                 vec![Dof2D::Ux, Dof2D::Uy],
                 6,
             ),
@@ -641,31 +633,44 @@ mod tests {
             Node2D::new(30, 0.0, 1.0).expect("valid node should be created"),
         ];
         let cases = [
-            ("truss", Element2D::Truss(Truss2D::new(1, [10, 20], 1.0).expect("valid truss should be created"))),
-            ("beam", Element2D::Beam(Beam2D::new(2, [10, 20], 1.0, 1.0).expect("valid beam should be created"))),
+            (
+                "truss",
+                Element2D::Truss(Truss2D::new(1, [10, 20], 0, 100).expect("valid truss should be created")),
+                Section2D::Truss(TrussSection2D::new(1.0).expect("valid section")),
+            ),
+            (
+                "beam",
+                Element2D::Beam(Beam2D::new(2, [10, 20], 0, 200).expect("valid beam should be created")),
+                Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section")),
+            ),
             (
                 "triangle",
-                Element2D::TriangleT3(TriangleT3::new(3, [10, 20, 30], 1.0).expect("valid triangle should be created")),
+                Element2D::TriangleT3(
+                    TriangleT3::new(3, [10, 20, 30], 0, 300).expect("valid triangle should be created"),
+                ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
             ),
         ];
 
-        for (name, element) in cases {
-            let actual = element.stiffness_matrix(&material, &nodes).expect("stiffness matrix should be calculated");
-            let expected = match &element {
-                Element2D::Truss(truss) => dynamic_matrix_from_array(
+        for (name, element, section) in cases {
+            let actual =
+                element.stiffness_matrix(&material, &section, &nodes).expect("stiffness matrix should be calculated");
+            let expected = match (&element, &section) {
+                (Element2D::Truss(truss), Section2D::Truss(section)) => dynamic_matrix_from_array(
                     truss
-                        .stiffness_matrix(&material, &nodes[0], &nodes[1])
+                        .stiffness_matrix(&material, section, &nodes[0], &nodes[1])
                         .expect("stiffness matrix should be calculated"),
                 ),
-                Element2D::Beam(beam) => dynamic_matrix_from_array(
-                    beam.stiffness_matrix(&material, &nodes[0], &nodes[1])
+                (Element2D::Beam(beam), Section2D::Beam(section)) => dynamic_matrix_from_array(
+                    beam.stiffness_matrix(&material, section, &nodes[0], &nodes[1])
                         .expect("stiffness matrix should be calculated"),
                 ),
-                Element2D::TriangleT3(triangle) => dynamic_matrix_from_array(
+                (Element2D::TriangleT3(triangle), Section2D::PlaneStress(section)) => dynamic_matrix_from_array(
                     triangle
-                        .stiffness_matrix(&material, &nodes[0], &nodes[1], &nodes[2])
+                        .stiffness_matrix(&material, section, &nodes[0], &nodes[1], &nodes[2])
                         .expect("stiffness matrix should be calculated"),
                 ),
+                _ => unreachable!("test cases should pair compatible elements and sections"),
             };
 
             assert_eq!(actual, expected, "failed case: {name}");
@@ -677,133 +682,12 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let known_node = Node2D::new(10, 0.0, 0.0).expect("valid node should be created");
         let element =
-            Element2D::Truss(Truss2D::new(1, [10, 20], 1.0).expect("valid truss connectivity should be created"));
+            Element2D::Truss(Truss2D::new(1, [10, 20], 0, 100).expect("valid truss connectivity should be created"));
+        let section = Section2D::Truss(TrussSection2D::new(1.0).expect("valid section"));
 
-        let result = element.stiffness_matrix(&material, &[known_node]);
+        let result = element.stiffness_matrix(&material, &section, &[known_node]);
 
         assert!(matches!(result, Err(FemError::UnknownId { entity: "node", id: 20 })));
-    }
-
-    #[test]
-    fn rejects_invalid_truss_cross_section_area() {
-        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
-
-        for (name, area) in cases {
-            let result = Truss2D::new(10, [1, 2], area);
-
-            assert!(
-                matches!(
-                    result,
-                    Err(FemError::InvalidElementProperty {
-                        element_id: 10,
-                        element_type: "truss",
-                        property: "cross-sectional area",
-                        value,
-                        reason: "must be finite and strictly positive",
-                    }) if value == area || (value.is_nan() && area.is_nan())
-                ),
-                "failed case: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_beam_cross_section_area() {
-        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
-
-        for (name, area) in cases {
-            let result = Beam2D::new(20, [2, 3], area, 1.0);
-
-            assert!(
-                matches!(
-                    result,
-                    Err(FemError::InvalidElementProperty {
-                        element_id: 20,
-                        element_type: "beam",
-                        property: "cross-sectional area",
-                        value,
-                        reason: "must be finite and strictly positive",
-                    }) if value == area || (value.is_nan() && area.is_nan())
-                ),
-                "failed case: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_beam_second_moment_of_area() {
-        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
-
-        for (name, second_moment_of_area) in cases {
-            let result = Beam2D::new(20, [2, 3], 1.0, second_moment_of_area);
-
-            assert!(
-                matches!(
-                    result,
-                    Err(FemError::InvalidElementProperty {
-                        element_id: 20,
-                        element_type: "beam",
-                        property: "second moment of area",
-                        value,
-                        reason: "must be finite and strictly positive",
-                    }) if value == second_moment_of_area || (value.is_nan() && second_moment_of_area.is_nan())
-                ),
-                "failed case: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn creates_beam_with_section_height() {
-        let beam = Beam2D::new_with_section_height(20, [2, 3], 0.03, 0.001, 0.2).expect("valid beam should be created");
-
-        assert_eq!(beam.section_height(), Some(0.2));
-    }
-
-    #[test]
-    fn rejects_invalid_beam_section_height() {
-        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
-
-        for (name, section_height) in cases {
-            let result = Beam2D::new_with_section_height(20, [2, 3], 1.0, 1.0, section_height);
-
-            assert!(
-                matches!(
-                    result,
-                    Err(FemError::InvalidElementProperty {
-                        element_id: 20,
-                        element_type: "beam",
-                        property: "section height",
-                        value,
-                        reason: "must be finite and strictly positive",
-                    }) if value == section_height || (value.is_nan() && section_height.is_nan())
-                ),
-                "failed case: {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_triangle_thickness() {
-        let cases = [("zero", 0.0), ("negative", -1.0), ("infinite", f64::INFINITY), ("not a number", f64::NAN)];
-
-        for (name, thickness) in cases {
-            let result = TriangleT3::new(30, [3, 4, 5], thickness);
-
-            assert!(
-                matches!(
-                    result,
-                    Err(FemError::InvalidElementProperty {
-                        element_id: 30,
-                        element_type: "triangle_t3",
-                        property: "thickness",
-                        value,
-                        reason: "must be finite and strictly positive",
-                    }) if value == thickness || (value.is_nan() && thickness.is_nan())
-                ),
-                "failed case: {name}"
-            );
-        }
     }
 
     #[test]
@@ -812,10 +696,11 @@ mod tests {
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 0.0).expect("valid node should be created");
         let third_node = Node2D::new(3, 0.0, 1.0).expect("valid node should be created");
-        let triangle = TriangleT3::new(30, [1, 2, 3], 1.0).expect("valid triangle should be created");
+        let triangle = TriangleT3::new(30, [1, 2, 3], 0, 300).expect("valid triangle should be created");
+        let section = PlaneStressSection2D::new(1.0).expect("valid section should be created");
 
         let matrix = triangle
-            .stiffness_matrix(&material, &first_node, &second_node, &third_node)
+            .stiffness_matrix(&material, &section, &first_node, &second_node, &third_node)
             .expect("stiffness matrix should be calculated");
 
         let expected = [
@@ -836,10 +721,11 @@ mod tests {
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 2.0, 0.0).expect("valid node should be created");
         let third_node = Node2D::new(3, 0.0, 1.0).expect("valid node should be created");
-        let triangle = TriangleT3::new(30, [1, 2, 3], 0.2).expect("valid triangle should be created");
+        let triangle = TriangleT3::new(30, [1, 2, 3], 0, 300).expect("valid triangle should be created");
+        let section = PlaneStressSection2D::new(0.2).expect("valid section should be created");
 
         let matrix = triangle
-            .stiffness_matrix(&material, &first_node, &second_node, &third_node)
+            .stiffness_matrix(&material, &section, &first_node, &second_node, &third_node)
             .expect("stiffness matrix should be calculated");
 
         let transposed = [
@@ -860,9 +746,10 @@ mod tests {
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 1.0).expect("valid node should be created");
         let third_node = Node2D::new(3, 2.0, 2.0).expect("valid node should be created");
-        let triangle = TriangleT3::new(30, [1, 2, 3], 0.2).expect("valid connectivity should be created");
+        let triangle = TriangleT3::new(30, [1, 2, 3], 0, 300).expect("valid connectivity should be created");
+        let section = PlaneStressSection2D::new(0.2).expect("valid section should be created");
 
-        let result = triangle.stiffness_matrix(&material, &first_node, &second_node, &third_node);
+        let result = triangle.stiffness_matrix(&material, &section, &first_node, &second_node, &third_node);
 
         assert!(matches!(
             result,
@@ -877,30 +764,15 @@ mod tests {
     }
 
     #[test]
-    fn exposes_element_cross_section_area() {
-        let truss = Truss2D::new(10, [1, 2], 0.02).expect("valid truss should be created");
-        let beam = Beam2D::new(20, [2, 3], 0.03, 0.001).expect("valid beam should be created");
-
-        let cases = [(Element2D::Truss(truss), Some(0.02)), (Element2D::Beam(beam), Some(0.03))];
-
-        assert_eq!(truss.cross_section_area(), 0.02);
-        assert_eq!(beam.cross_section_area(), 0.03);
-        assert_eq!(beam.second_moment_of_area(), 0.001);
-
-        for (element, expected_area) in cases {
-            assert_eq!(element.cross_section_area(), expected_area);
-        }
-    }
-
-    #[test]
     fn calculates_stiffness_matrix_for_horizontal_truss() {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 2.0, 0.0).expect("valid node should be created");
-        let truss = Truss2D::new(10, [1, 2], 0.5).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], 0, 100).expect("valid truss should be created");
+        let section = TrussSection2D::new(0.5).expect("valid section should be created");
 
         let matrix = truss
-            .stiffness_matrix(&material, &first_node, &second_node)
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
             .expect("stiffness matrix should be calculated");
 
         assert_eq!(
@@ -914,10 +786,12 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 0.0).expect("valid node should be created");
-        let beam = Beam2D::new(20, [1, 2], 2.0, 3.0).expect("valid beam should be created");
+        let beam = Beam2D::new(20, [1, 2], 0, 200).expect("valid beam should be created");
+        let section = BeamSection2D::new(2.0, 3.0).expect("valid section should be created");
 
-        let matrix =
-            beam.stiffness_matrix(&material, &first_node, &second_node).expect("stiffness matrix should be calculated");
+        let matrix = beam
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
+            .expect("stiffness matrix should be calculated");
 
         assert_eq!(
             matrix,
@@ -937,10 +811,12 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 2.0, 0.0).expect("valid node should be created");
-        let beam = Beam2D::new(20, [1, 2], 2.0, 3.0).expect("valid beam should be created");
+        let beam = Beam2D::new(20, [1, 2], 0, 200).expect("valid beam should be created");
+        let section = BeamSection2D::new(2.0, 3.0).expect("valid section should be created");
 
-        let matrix =
-            beam.stiffness_matrix(&material, &first_node, &second_node).expect("stiffness matrix should be calculated");
+        let matrix = beam
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
+            .expect("stiffness matrix should be calculated");
 
         let expected = [
             [200.0, 0.0, 0.0, -200.0, 0.0, 0.0],
@@ -959,10 +835,12 @@ mod tests {
         let material = Material2D::new(1.0, 0.3, 1.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 1.0).expect("valid node should be created");
-        let beam = Beam2D::new(20, [1, 2], 1.0, 1.0).expect("valid beam should be created");
+        let beam = Beam2D::new(20, [1, 2], 0, 200).expect("valid beam should be created");
+        let section = BeamSection2D::new(1.0, 1.0).expect("valid section should be created");
 
-        let matrix =
-            beam.stiffness_matrix(&material, &first_node, &second_node).expect("stiffness matrix should be calculated");
+        let matrix = beam
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
+            .expect("stiffness matrix should be calculated");
 
         let length = 2.0_f64.sqrt();
         let c = 1.0 / length;
@@ -995,10 +873,12 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 2.0, 0.0).expect("valid node should be created");
-        let beam = Beam2D::new(20, [1, 2], 2.0, 3.0).expect("valid beam should be created");
+        let beam = Beam2D::new(20, [1, 2], 0, 200).expect("valid beam should be created");
+        let section = BeamSection2D::new(2.0, 3.0).expect("valid section should be created");
 
-        let matrix =
-            beam.stiffness_matrix(&material, &first_node, &second_node).expect("stiffness matrix should be calculated");
+        let matrix = beam
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
+            .expect("stiffness matrix should be calculated");
 
         let transposed = [
             [matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0], matrix[4][0], matrix[5][0]],
@@ -1017,9 +897,10 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 0.0, 0.0).expect("valid node should be created");
-        let beam = Beam2D::new(20, [1, 2], 2.0, 3.0).expect("valid connectivity should be created");
+        let beam = Beam2D::new(20, [1, 2], 0, 200).expect("valid connectivity should be created");
+        let section = BeamSection2D::new(2.0, 3.0).expect("valid section should be created");
 
-        let result = beam.stiffness_matrix(&material, &first_node, &second_node);
+        let result = beam.stiffness_matrix(&material, &section, &first_node, &second_node);
 
         assert!(matches!(
             result,
@@ -1038,10 +919,11 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 1.0).expect("valid node should be created");
-        let truss = Truss2D::new(10, [1, 2], 0.5).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], 0, 100).expect("valid truss should be created");
+        let section = TrussSection2D::new(0.5).expect("valid section should be created");
 
         let matrix = truss
-            .stiffness_matrix(&material, &first_node, &second_node)
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
             .expect("stiffness matrix should be calculated");
 
         let value = 25.0 * 2.0_f64.sqrt();
@@ -1060,10 +942,11 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 1.0, 1.0).expect("valid node should be created");
-        let truss = Truss2D::new(10, [1, 2], 0.5).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], 0, 100).expect("valid truss should be created");
+        let section = TrussSection2D::new(0.5).expect("valid section should be created");
 
         let matrix = truss
-            .stiffness_matrix(&material, &first_node, &second_node)
+            .stiffness_matrix(&material, &section, &first_node, &second_node)
             .expect("stiffness matrix should be calculated");
 
         let transposed = [
@@ -1081,9 +964,10 @@ mod tests {
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
         let second_node = Node2D::new(2, 0.0, 0.0).expect("valid node should be created");
-        let truss = Truss2D::new(10, [1, 2], 0.5).expect("valid connectivity should be created");
+        let truss = Truss2D::new(10, [1, 2], 0, 100).expect("valid connectivity should be created");
+        let section = TrussSection2D::new(0.5).expect("valid section should be created");
 
-        let result = truss.stiffness_matrix(&material, &first_node, &second_node);
+        let result = truss.stiffness_matrix(&material, &section, &first_node, &second_node);
 
         assert!(matches!(
             result,

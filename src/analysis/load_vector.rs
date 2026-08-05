@@ -21,7 +21,9 @@ mod tests {
     use super::assemble_load_vector;
     use crate::elements::{Beam2D, Element2D, Truss2D};
     use crate::error::FemError;
-    use crate::model::{Dof2D, Model2D, NodalLoad2D, Node2D};
+    use crate::model::{
+        BeamSection2D, DEFAULT_MATERIAL_ID, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D, Section2D, TrussSection2D,
+    };
     use nalgebra::DVector;
 
     #[test]
@@ -83,24 +85,28 @@ mod tests {
 
     fn model_with_beam() -> Model2D {
         let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
 
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
-        let beam = Beam2D::new(10, [1, 2], 1.0, 1.0).expect("valid beam should be created");
-        model.add_element(Element2D::Beam(beam)).expect("beam should be added");
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
 
         model
     }
 
     fn model_with_truss() -> Model2D {
         let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
 
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
-        let truss = Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created");
-        model.add_element(Element2D::Truss(truss)).expect("truss should be added");
+        let truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Truss(truss), section).expect("truss should be added");
 
         model
     }

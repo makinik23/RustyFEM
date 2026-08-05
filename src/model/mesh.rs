@@ -1,8 +1,7 @@
 //! Mesh data for a two-dimensional finite element model.
 
-use crate::elements::Element2D;
-
 use super::node::Node2D;
+use crate::elements::Element2D;
 
 /// Stores the geometric and topological part of a 2D model.
 #[derive(Default)]
@@ -113,8 +112,8 @@ mod tests {
     fn stores_elements_in_insertion_order() {
         let mut mesh = Mesh2D::new();
 
-        let first = Element2D::Truss(Truss2D::new(100, [1, 2], 1.0).expect("valid truss"));
-        let second = Element2D::Truss(Truss2D::new(200, [2, 3], 2.0).expect("valid truss"));
+        let first = Element2D::Truss(Truss2D::new(100, [1, 2], 1, 10).expect("valid truss"));
+        let second = Element2D::Truss(Truss2D::new(200, [2, 3], 1, 20).expect("valid truss"));
 
         mesh.push_element(first);
         mesh.push_element(second);
@@ -126,7 +125,7 @@ mod tests {
     fn reports_existing_element_ids() {
         let mut mesh = Mesh2D::new();
 
-        let element = Element2D::Truss(Truss2D::new(100, [1, 2], 1.0).expect("valid truss"));
+        let element = Element2D::Truss(Truss2D::new(100, [1, 2], 1, 10).expect("valid truss"));
 
         mesh.push_element(element);
 

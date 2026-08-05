@@ -1,10 +1,16 @@
 //! Defines a 2D model consisting of nodes and displacement constraints.
 
-use super::constraint::DisplacementConstraint2D;
-use super::load::NodalLoad2D;
-use super::material::Material2D;
-use super::node::Node2D;
+use super::AnalysisSettings2D;
+use super::BoundaryConditions2D;
+use super::Loads2D;
+use super::Materials2D;
 use super::Mesh2D;
+use super::Sections2D;
+use super::constraint::DisplacementConstraint2D;
+use super::material_model::Material2D;
+use super::nodal_load::NodalLoad2D;
+use super::node::Node2D;
+use super::sections::{BeamSection2D, PlaneStressSection2D, Section2D, TrussSection2D};
 use crate::elements::Element2D;
 use crate::error::FemError;
 
@@ -12,9 +18,11 @@ use crate::error::FemError;
 #[derive(Default)]
 pub struct Model2D {
     mesh: Mesh2D,
-    constraints: Vec<DisplacementConstraint2D>,
-    material: Option<Material2D>,
-    loads: Vec<NodalLoad2D>,
+    boundary_conditions: BoundaryConditions2D,
+    materials: Materials2D,
+    sections: Sections2D,
+    loads: Loads2D,
+    analysis_settings: AnalysisSettings2D,
 }
 
 impl Model2D {
@@ -40,7 +48,7 @@ impl Model2D {
             return Err(FemError::UnknownId { entity: "node", id: constraint.node_id() });
         }
 
-        self.constraints.push(constraint);
+        self.boundary_conditions.push_displacement_constraint(constraint);
 
         Ok(())
     }
@@ -48,6 +56,30 @@ impl Model2D {
     /// Adds an element to the model. Returns an error if an element with the same ID already exists
     /// or if any of the node IDs associated with the element do not exist in the model.
     pub fn add_element(&mut self, element: Element2D) -> Result<(), FemError> {
+        self.validate_element_for_insert(&element)?;
+
+        self.materials.material(element.material_id())?;
+        let section = self.sections.section(element.section_id())?;
+        element.validate_section(section)?;
+
+        self.mesh.push_element(element);
+
+        Ok(())
+    }
+
+    /// Adds an element together with its referenced section.
+    pub fn add_element_with_section(&mut self, element: Element2D, section: Section2D) -> Result<(), FemError> {
+        self.validate_element_for_insert(&element)?;
+        self.materials.material(element.material_id())?;
+        element.validate_section(&section)?;
+
+        self.sections.add_section(element.section_id(), section)?;
+        self.mesh.push_element(element);
+
+        Ok(())
+    }
+
+    fn validate_element_for_insert(&self, element: &Element2D) -> Result<(), FemError> {
         if self.mesh.contains_element_id(element.id()) {
             return Err(FemError::DuplicateId { entity: "element", id: element.id() });
         }
@@ -56,16 +88,24 @@ impl Model2D {
             self.find_node(node_id)?;
         }
 
-        self.validate_element_geometry(&element)?;
-
-        self.mesh.push_element(element);
+        self.validate_element_geometry(element)?;
 
         Ok(())
     }
 
+    /// Adds a section to the model.
+    pub fn add_section(&mut self, section_id: usize, section: Section2D) -> Result<(), FemError> {
+        self.sections.add_section(section_id, section)
+    }
+
+    /// Adds a material to the model.
+    pub fn add_material(&mut self, material_id: usize, material: Material2D) -> Result<(), FemError> {
+        self.materials.add_material(material_id, material)
+    }
+
     /// Sets the material properties for the model.
     pub fn set_material(&mut self, material: Material2D) {
-        self.material = Some(material);
+        self.materials.set_default_material(material);
     }
 
     /// Finds a node in the model by its ID. Returns a reference to the node if found, or an error if the node ID does not exist in the model.
@@ -128,7 +168,7 @@ impl Model2D {
             return Err(FemError::UnknownId { entity: "node", id: load.node_id() });
         }
 
-        self.loads.push(load);
+        self.loads.push_nodal_load(load);
 
         Ok(())
     }
@@ -142,7 +182,7 @@ impl Model2D {
     /// Returns a slice of all displacement constraints in the model.
     #[must_use]
     pub fn constraints(&self) -> &[DisplacementConstraint2D] {
-        &self.constraints
+        self.boundary_conditions.displacement_constraints()
     }
 
     /// Returns a slice of all elements in the model.
@@ -151,16 +191,64 @@ impl Model2D {
         self.mesh.elements()
     }
 
-    /// Returns the material properties of the model.
+    /// Returns all section definitions.
     #[must_use]
-    pub fn material(&self) -> Option<&Material2D> {
-        self.material.as_ref()
+    pub fn sections(&self) -> &Sections2D {
+        &self.sections
+    }
+
+    /// Returns all material definitions.
+    #[must_use]
+    pub fn materials(&self) -> &Materials2D {
+        &self.materials
+    }
+
+    /// Returns a section by ID.
+    pub fn section(&self, section_id: usize) -> Result<&Section2D, FemError> {
+        self.sections.section(section_id)
+    }
+
+    /// Returns a truss section by ID.
+    pub fn truss_section(&self, section_id: usize) -> Result<&TrussSection2D, FemError> {
+        self.sections.truss_section(section_id)
+    }
+
+    /// Returns a beam section by ID.
+    pub fn beam_section(&self, section_id: usize) -> Result<&BeamSection2D, FemError> {
+        self.sections.beam_section(section_id)
+    }
+
+    /// Returns a plane-stress section by ID.
+    pub fn plane_stress_section(&self, section_id: usize) -> Result<&PlaneStressSection2D, FemError> {
+        self.sections.plane_stress_section(section_id)
+    }
+
+    /// Returns a material by ID.
+    pub fn material(&self, material_id: usize) -> Result<&Material2D, FemError> {
+        self.materials.material(material_id)
+    }
+
+    /// Returns the default material if one was set through `set_material`.
+    #[must_use]
+    pub fn default_material(&self) -> Option<&Material2D> {
+        self.materials.default_material()
     }
 
     /// Returns a slice of all nodal loads in the model.
     #[must_use]
     pub fn loads(&self) -> &[NodalLoad2D] {
-        &self.loads
+        self.loads.nodal_loads()
+    }
+
+    /// Returns the analysis settings for the model.
+    #[must_use]
+    pub fn analysis_settings(&self) -> &AnalysisSettings2D {
+        &self.analysis_settings
+    }
+
+    /// Returns mutable analysis settings for the model.
+    pub fn analysis_settings_mut(&mut self) -> &mut AnalysisSettings2D {
+        &mut self.analysis_settings
     }
 }
 
@@ -169,7 +257,10 @@ mod tests {
     use super::Model2D;
     use crate::FemError;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, NodalLoad2D, Node2D};
+    use crate::model::{
+        DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, NodalLoad2D, Node2D, Section2D, SolverKind2D,
+        TrussSection2D,
+    };
 
     #[test]
     fn creates_empty_model() {
@@ -178,12 +269,29 @@ mod tests {
         assert!(model.nodes().is_empty());
         assert!(model.constraints().is_empty());
         assert!(model.elements().is_empty());
-        assert!(model.material().is_none());
+        assert!(model.sections().sections().is_empty());
+        assert!(model.materials().materials().is_empty());
+        assert!(model.default_material().is_none());
+        assert_eq!(model.analysis_settings().solver(), SolverKind2D::Dense);
+    }
+
+    #[test]
+    fn updates_analysis_settings() {
+        let mut model = Model2D::new();
+
+        model.analysis_settings_mut().set_solver(SolverKind2D::Sparse);
+        model.analysis_settings_mut().set_cg_max_iterations(250).expect("iteration limit should be valid");
+        model.analysis_settings_mut().set_cg_tolerance(1e-8).expect("tolerance should be valid");
+
+        assert_eq!(model.analysis_settings().solver(), SolverKind2D::Sparse);
+        assert_eq!(model.analysis_settings().cg_max_iterations(), 250);
+        assert_eq!(model.analysis_settings().cg_tolerance(), 1e-8);
     }
 
     #[test]
     fn adds_node_to_model() {
         let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
         let node = Node2D::new(10, 1.5, -2.0).expect("valid node should be created");
 
         model.add_node(node).expect("node should be added");
@@ -271,6 +379,7 @@ mod tests {
     #[test]
     fn adds_element_for_existing_nodes() {
         let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
 
         let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
 
@@ -279,14 +388,34 @@ mod tests {
         model.add_node(first_node).expect("node should be added");
         model.add_node(second_node).expect("node should be added");
 
-        let truss = Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
         let element = Element2D::Truss(truss);
+        let section = Section2D::Truss(TrussSection2D::new(1.0).expect("valid section should be created"));
 
-        model.add_element(element).expect("element should be added");
+        model.add_element_with_section(element, section).expect("element should be added");
 
         assert_eq!(model.elements().len(), 1);
         assert_eq!(model.elements()[0].id(), 10);
         assert_eq!(model.elements()[0].node_ids(), &[1, 2]);
+        assert_eq!(model.elements()[0].material_id(), DEFAULT_MATERIAL_ID);
+        assert_eq!(model.elements()[0].section_id(), 100);
+        assert!(model.truss_section(100).is_ok());
+    }
+
+    #[test]
+    fn rejects_element_for_unknown_material() {
+        let mut model = Model2D::new();
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let truss = Truss2D::new(10, [1, 2], 99, 100).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(1.0).expect("valid section should be created"));
+        let result = model.add_element_with_section(Element2D::Truss(truss), section);
+
+        assert!(matches!(result, Err(FemError::UnknownId { entity: "material", id: 99 })));
+        assert!(model.elements().is_empty());
+        assert!(model.sections().sections().is_empty());
     }
 
     #[test]
@@ -297,7 +426,9 @@ mod tests {
 
         model.add_node(node).expect("node should be added");
 
-        let element = Element2D::Truss(Truss2D::new(10, [1, 99], 1.0).expect("valid truss should be created"));
+        let element = Element2D::Truss(
+            Truss2D::new(10, [1, 99], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created"),
+        );
 
         let result = model.add_element(element);
 
@@ -319,18 +450,25 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(10, [1, 2], 1.0).expect("valid truss connectivity should be created")),
+                Element2D::Truss(
+                    Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100)
+                        .expect("valid truss connectivity should be created"),
+                ),
                 "length",
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(20, [1, 2], 1.0, 1.0).expect("valid beam connectivity should be created")),
+                Element2D::Beam(
+                    Beam2D::new(20, [1, 2], DEFAULT_MATERIAL_ID, 200)
+                        .expect("valid beam connectivity should be created"),
+                ),
                 "length",
             ),
             (
                 "triangle_t3",
                 Element2D::TriangleT3(
-                    TriangleT3::new(30, [1, 2, 3], 1.0).expect("valid triangle connectivity should be created"),
+                    TriangleT3::new(30, [1, 2, 3], DEFAULT_MATERIAL_ID, 300)
+                        .expect("valid triangle connectivity should be created"),
                 ),
                 "area",
             ),
@@ -369,6 +507,7 @@ mod tests {
         model.set_material(first);
         model.set_material(second);
 
-        assert_eq!(model.material(), Some(&second));
+        assert_eq!(model.default_material(), Some(&second));
+        assert_eq!(model.material(DEFAULT_MATERIAL_ID).expect("default material should exist"), &second);
     }
 }

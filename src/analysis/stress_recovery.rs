@@ -8,7 +8,7 @@ use crate::elements::interpolation::{
 };
 use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
 use crate::error::FemError;
-use crate::model::{DofNumbering2D, Material2D, Model2D, Node2D};
+use crate::model::{BeamSection2D, DofNumbering2D, Material2D, Model2D, Node2D, TrussSection2D};
 
 /// Position used when interpolating a displacement field inside a 2D element.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,7 +105,8 @@ impl TrussResponse2D {
 pub fn recover_truss_response(
     model: &Model2D, truss: &Truss2D, global_displacements: &DVector<f64>,
 ) -> Result<TrussResponse2D, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
+    let material = model.material(truss.material_id())?;
+    let section = model.truss_section(truss.section_id())?;
     let numbering = DofNumbering2D::from_model(model)?;
 
     if global_displacements.len() != numbering.count() {
@@ -128,7 +129,7 @@ pub fn recover_truss_response(
         global_displacements[indices[3]],
     ];
 
-    calculate_truss_response(truss, material, first_node, second_node, element_displacements)
+    calculate_truss_response(truss, material, section, first_node, second_node, element_displacements)
 }
 
 fn find_node(nodes: &[Node2D], node_id: usize) -> Result<&Node2D, FemError> {
@@ -136,7 +137,7 @@ fn find_node(nodes: &[Node2D], node_id: usize) -> Result<&Node2D, FemError> {
 }
 
 fn calculate_truss_response(
-    truss: &Truss2D, material: &Material2D, first_node: &Node2D, second_node: &Node2D,
+    truss: &Truss2D, material: &Material2D, section: &TrussSection2D, first_node: &Node2D, second_node: &Node2D,
     [first_x, first_y, second_x, second_y]: [f64; 4],
 ) -> Result<TrussResponse2D, FemError> {
     let dx = second_node.x() - first_node.x();
@@ -157,7 +158,7 @@ fn calculate_truss_response(
     let sine = dy / length;
     let strain = (-cosine * first_x - sine * first_y + cosine * second_x + sine * second_y) / length;
     let stress = material.young_modulus() * strain;
-    let axial_force = stress * truss.cross_section_area();
+    let axial_force = stress * section.cross_section_area();
 
     Ok(TrussResponse2D { strain, stress, axial_force })
 }
@@ -223,10 +224,11 @@ impl BeamResponse2D {
 pub fn recover_beam_response(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>,
 ) -> Result<BeamResponse2D, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
+    let material = model.material(beam.material_id())?;
+    let section = model.beam_section(beam.section_id())?;
     let (local_displacements, length) = extract_beam_local_displacements(model, beam, global_displacements)?;
 
-    Ok(calculate_beam_end_forces(beam, material, length, local_displacements))
+    Ok(calculate_beam_end_forces(beam, material, section, length, local_displacements))
 }
 
 fn extract_beam_local_displacements(
@@ -268,9 +270,9 @@ fn extract_beam_local_displacements(
 }
 
 fn calculate_beam_end_forces(
-    beam: &Beam2D, material: &Material2D, length: f64, local_displacements: [f64; 6],
+    beam: &Beam2D, material: &Material2D, section: &BeamSection2D, length: f64, local_displacements: [f64; 6],
 ) -> BeamResponse2D {
-    let local_stiffness_matrix = beam.local_stiffness_matrix(material, length);
+    let local_stiffness_matrix = beam.local_stiffness_matrix(material, section, length);
     let mut end_forces = [0.0; 6];
 
     for (row, end_force) in end_forces.iter_mut().enumerate() {
@@ -362,25 +364,26 @@ impl BeamSectionResponse2D {
 pub fn recover_beam_section_response(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>, position: f64,
 ) -> Result<BeamSectionResponse2D, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
+    let material = model.material(beam.material_id())?;
+    let section = model.beam_section(beam.section_id())?;
     let (local_displacements, length) = extract_beam_local_displacements(model, beam, global_displacements)?;
     let axial_strain = (local_displacements[3] - local_displacements[0]) / length;
-    let axial_force = material.young_modulus() * beam.cross_section_area() * axial_strain;
+    let axial_force = material.young_modulus() * section.cross_section_area() * axial_strain;
     let xi = normalized_two_node_position(position, length)?;
     let second_derivatives = cubic_hermite_second_derivatives(xi, length)?;
     let curvature = second_derivatives[0] * local_displacements[1]
         + second_derivatives[1] * local_displacements[2]
         + second_derivatives[2] * local_displacements[4]
         + second_derivatives[3] * local_displacements[5];
-    let bending_moment = material.young_modulus() * beam.second_moment_of_area() * curvature;
+    let bending_moment = material.young_modulus() * section.second_moment_of_area() * curvature;
 
     Ok(BeamSectionResponse2D {
         axial_strain,
         axial_force,
         curvature,
         bending_moment,
-        cross_section_area: beam.cross_section_area(),
-        second_moment_of_area: beam.second_moment_of_area(),
+        cross_section_area: section.cross_section_area(),
+        second_moment_of_area: section.second_moment_of_area(),
     })
 }
 
@@ -553,7 +556,8 @@ impl TriangleResponse2D {
 pub fn recover_triangle_response(
     model: &Model2D, triangle: &TriangleT3, global_displacements: &DVector<f64>,
 ) -> Result<TriangleResponse2D, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
+    let material = model.material(triangle.material_id())?;
+    model.plane_stress_section(triangle.section_id())?;
     let numbering = DofNumbering2D::from_model(model)?;
 
     if global_displacements.len() != numbering.count() {
@@ -671,9 +675,48 @@ mod tests {
     use crate::analysis::solver::solve;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::error::FemError;
-    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D};
+    use crate::model::{
+        BeamSection2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D,
+        PlaneStressSection2D, Section2D, TrussSection2D,
+    };
     use approx::assert_relative_eq;
     use nalgebra::DVector;
+
+    fn add_truss_element(model: &mut Model2D, id: usize, node_ids: [usize; 2], cross_section_area: f64) -> Truss2D {
+        let truss = Truss2D::new(id, node_ids, DEFAULT_MATERIAL_ID, id).expect("valid truss should be created");
+        let section =
+            Section2D::Truss(TrussSection2D::new(cross_section_area).expect("valid truss section should be created"));
+
+        model.add_element_with_section(Element2D::Truss(truss), section).expect("truss should be added");
+
+        truss
+    }
+
+    fn add_beam_element(
+        model: &mut Model2D, id: usize, node_ids: [usize; 2], cross_section_area: f64, second_moment_of_area: f64,
+    ) -> Beam2D {
+        let beam = Beam2D::new(id, node_ids, DEFAULT_MATERIAL_ID, id).expect("valid beam should be created");
+        let section = Section2D::Beam(
+            BeamSection2D::new(cross_section_area, second_moment_of_area)
+                .expect("valid beam section should be created"),
+        );
+
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
+
+        beam
+    }
+
+    fn add_triangle_element(model: &mut Model2D, id: usize, node_ids: [usize; 3], thickness: f64) -> TriangleT3 {
+        let triangle =
+            TriangleT3::new(id, node_ids, DEFAULT_MATERIAL_ID, id).expect("valid triangle should be created");
+        let section = Section2D::PlaneStress(
+            PlaneStressSection2D::new(thickness).expect("valid plane-stress section should be created"),
+        );
+
+        model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("triangle should be added");
+
+        triangle
+    }
 
     fn horizontal_truss_model() -> Model2D {
         let mut model = Model2D::new();
@@ -681,9 +724,7 @@ mod tests {
         model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
-        model
-            .add_element(Element2D::Truss(Truss2D::new(10, [1, 2], 2.0).expect("valid truss should be created")))
-            .expect("element should be added");
+        add_truss_element(&mut model, 10, [1, 2], 2.0);
 
         model
     }
@@ -847,9 +888,7 @@ mod tests {
         model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 1.0).expect("valid node should be created")).expect("node should be added");
-        model
-            .add_element(Element2D::Truss(Truss2D::new(10, [1, 2], 1.0).expect("valid truss should be created")))
-            .expect("element should be added");
+        add_truss_element(&mut model, 10, [1, 2], 1.0);
 
         let truss = match model.elements()[0] {
             Element2D::Truss(truss) => truss,
@@ -910,9 +949,7 @@ mod tests {
         model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
-        model
-            .add_element(Element2D::Beam(Beam2D::new(10, [1, 2], 1.0, 2.0).expect("valid beam should be created")))
-            .expect("element should be added");
+        add_beam_element(&mut model, 10, [1, 2], 1.0, 2.0);
 
         model
     }
@@ -950,9 +987,7 @@ mod tests {
         model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 1.0).expect("valid node should be created")).expect("node should be added");
-        model
-            .add_element(Element2D::Beam(Beam2D::new(10, [1, 2], 1.0, 2.0).expect("valid beam should be created")))
-            .expect("element should be added");
+        add_beam_element(&mut model, 10, [1, 2], 1.0, 2.0);
 
         let beam = match model.elements()[0] {
             Element2D::Beam(beam) => beam,
@@ -1085,12 +1120,8 @@ mod tests {
                 .add_node(Node2D::new(id, x, 0.0).expect("valid node should be created"))
                 .expect("node should be added");
         }
-        model
-            .add_element(Element2D::Beam(Beam2D::new(10, [1, 2], 1.0, 2.0).expect("valid beam should be created")))
-            .expect("first beam should be added");
-        model
-            .add_element(Element2D::Beam(Beam2D::new(20, [2, 3], 1.0, 2.0).expect("valid beam should be created")))
-            .expect("second beam should be added");
+        add_beam_element(&mut model, 10, [1, 2], 1.0, 2.0);
+        add_beam_element(&mut model, 20, [2, 3], 1.0, 2.0);
 
         for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (3, Dof2D::Uy)] {
             model
@@ -1172,11 +1203,7 @@ mod tests {
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(3, 0.0, 1.0).expect("valid node should be created")).expect("node should be added");
-        model
-            .add_element(Element2D::TriangleT3(
-                TriangleT3::new(10, node_ids, 1.0).expect("valid triangle should be created"),
-            ))
-            .expect("element should be added");
+        add_triangle_element(&mut model, 10, node_ids, 1.0);
 
         model
     }
@@ -1191,16 +1218,8 @@ mod tests {
             model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
         }
 
-        model
-            .add_element(Element2D::TriangleT3(
-                TriangleT3::new(10, [1, 2, 3], 1.0).expect("valid triangle should be created"),
-            ))
-            .expect("first triangle should be added");
-        model
-            .add_element(Element2D::TriangleT3(
-                TriangleT3::new(20, [1, 3, 4], 1.0).expect("valid triangle should be created"),
-            ))
-            .expect("second triangle should be added");
+        add_triangle_element(&mut model, 10, [1, 2, 3], 1.0);
+        add_triangle_element(&mut model, 20, [1, 3, 4], 1.0);
 
         for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (4, Dof2D::Ux)] {
             model
@@ -1252,18 +1271,8 @@ mod tests {
                 let upper_right = upper_left + 1;
                 let element_id = 100 + 2 * (row * nx + column);
 
-                model
-                    .add_element(Element2D::TriangleT3(
-                        TriangleT3::new(element_id, [lower_left, lower_right, upper_right], thickness)
-                            .expect("valid triangle should be created"),
-                    ))
-                    .expect("first triangle should be added");
-                model
-                    .add_element(Element2D::TriangleT3(
-                        TriangleT3::new(element_id + 1, [lower_left, upper_right, upper_left], thickness)
-                            .expect("valid triangle should be created"),
-                    ))
-                    .expect("second triangle should be added");
+                add_triangle_element(&mut model, element_id, [lower_left, lower_right, upper_right], thickness);
+                add_triangle_element(&mut model, element_id + 1, [lower_left, upper_right, upper_left], thickness);
             }
         }
 
@@ -1611,11 +1620,8 @@ mod tests {
     #[test]
     fn recovers_responses_for_all_model_elements_and_preserves_ids() {
         let mut model = right_triangle_model([1, 2, 3]);
-        let beam = Beam2D::new(20, [1, 2], 1.0, 2.0).expect("valid beam should be created");
-        let truss = Truss2D::new(30, [2, 3], 1.0).expect("valid truss should be created");
-
-        model.add_element(Element2D::Beam(beam)).expect("beam should be added");
-        model.add_element(Element2D::Truss(truss)).expect("truss should be added");
+        add_beam_element(&mut model, 20, [1, 2], 1.0, 2.0);
+        add_truss_element(&mut model, 30, [2, 3], 1.0);
 
         let responses = recover_model_responses(&model, &DVector::zeros(8)).expect("responses should be recovered");
 
