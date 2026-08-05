@@ -17,15 +17,6 @@ pub enum FemError {
     #[error("element {element_id} has invalid connectivity: {node_ids:?}")]
     InvalidElementConnectivity { element_id: usize, node_ids: Vec<usize> },
 
-    #[error("element {element_id} ({element_type}) has invalid {property}: {value}; {reason}")]
-    InvalidElementProperty {
-        element_id: usize,
-        element_type: &'static str,
-        property: &'static str,
-        value: f64,
-        reason: &'static str,
-    },
-
     #[error("element {element_id} ({element_type}) is degenerate: {measure_name} = {measure}; node IDs: {node_ids:?}")]
     DegenerateElement {
         element_id: usize,
@@ -46,6 +37,12 @@ pub enum FemError {
 
     #[error("model has no material")]
     MissingMaterial,
+
+    #[error("section ({section_type}) has invalid {property}: {value}; {reason}")]
+    InvalidSectionProperty { section_type: &'static str, property: &'static str, value: f64, reason: &'static str },
+
+    #[error("section {section_id} has type {actual}, expected {expected}")]
+    InvalidSectionType { section_id: usize, expected: &'static str, actual: &'static str },
 
     #[error("nodal load on node {node_id} has invalid value: {value}")]
     InvalidNodalLoad { node_id: usize, value: f64 },
@@ -83,6 +80,9 @@ pub enum FemError {
 
     #[error("conjugate gradient tolerance must be finite and positive: {value}")]
     InvalidSolverTolerance { value: f64 },
+
+    #[error("conjugate gradient iteration limit must be positive: {value}")]
+    InvalidSolverIterationLimit { value: usize },
 
     #[error("stagnation tolerance must be finite and non-negative: {value}")]
     InvalidStagnationTolerance { value: f64 },

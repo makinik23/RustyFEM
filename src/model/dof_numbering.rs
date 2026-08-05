@@ -86,19 +86,28 @@ mod tests {
     use super::DofNumbering2D;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::model::DisplacementConstraint2D;
-    use crate::model::{Dof2D, Model2D, Node2D};
+    use crate::model::{
+        BeamSection2D, DEFAULT_MATERIAL_ID, Dof2D, Material2D, Model2D, Node2D, PlaneStressSection2D, Section2D,
+        TrussSection2D,
+    };
+
+    fn set_test_material(model: &mut Model2D) {
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material"));
+    }
 
     #[test]
     fn numbers_beam_degrees_of_freedom() {
         let mut model = Model2D::new();
+        set_test_material(&mut model);
 
         model.add_node(Node2D::new(10, 0.0, 0.0).expect("valid node")).expect("node should be added");
 
         model.add_node(Node2D::new(20, 1.0, 0.0).expect("valid node")).expect("node should be added");
 
-        let beam = Beam2D::new(1, [10, 20], 1.0, 1.0).expect("valid beam");
+        let beam = Beam2D::new(1, [10, 20], DEFAULT_MATERIAL_ID, 100).expect("valid beam");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section"));
 
-        model.add_element(Element2D::Beam(beam)).expect("element should be added");
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("element should be added");
 
         let numbering = DofNumbering2D::from_model(&model).expect("numbering should be created");
 
@@ -118,23 +127,34 @@ mod tests {
         let cases = [
             (
                 "truss",
-                Element2D::Truss(Truss2D::new(1, [10, 20], 1.0).expect("valid truss should be created")),
+                Element2D::Truss(
+                    Truss2D::new(1, [10, 20], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created"),
+                ),
+                Section2D::Truss(TrussSection2D::new(1.0).expect("valid section")),
                 vec![0, 1, 2, 3],
             ),
             (
                 "beam",
-                Element2D::Beam(Beam2D::new(2, [10, 20], 1.0, 1.0).expect("valid beam should be created")),
+                Element2D::Beam(
+                    Beam2D::new(2, [10, 20], DEFAULT_MATERIAL_ID, 200).expect("valid beam should be created"),
+                ),
+                Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section")),
                 vec![0, 1, 2, 3, 4, 5],
             ),
             (
                 "triangle_t3",
-                Element2D::TriangleT3(TriangleT3::new(3, [10, 20, 30], 1.0).expect("valid triangle should be created")),
+                Element2D::TriangleT3(
+                    TriangleT3::new(3, [10, 20, 30], DEFAULT_MATERIAL_ID, 300)
+                        .expect("valid triangle should be created"),
+                ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
                 vec![0, 1, 2, 3, 4, 5],
             ),
         ];
 
-        for (name, element, expected_indices) in cases {
+        for (name, element, section, expected_indices) in cases {
             let mut model = Model2D::new();
+            set_test_material(&mut model);
 
             let nodes = [(10, 0.0, 0.0), (20, 1.0, 0.0), (30, 0.0, 1.0)];
 
@@ -144,7 +164,7 @@ mod tests {
                 model.add_node(node).expect("node should be added");
             }
 
-            model.add_element(element).expect("element should be added");
+            model.add_element_with_section(element, section).expect("element should be added");
 
             let numbering = DofNumbering2D::from_model(&model).expect("numbering should be created");
 
@@ -157,13 +177,17 @@ mod tests {
     #[test]
     fn maps_constraints_to_global_dofs() {
         let mut model = Model2D::new();
+        set_test_material(&mut model);
 
         model.add_node(Node2D::new(10, 0.0, 0.0).expect("valid node")).expect("node should be added");
 
         model.add_node(Node2D::new(20, 1.0, 0.0).expect("valid node")).expect("node should be added");
 
         model
-            .add_element(Element2D::Beam(Beam2D::new(1, [10, 20], 1.0, 1.0).expect("valid beam")))
+            .add_element_with_section(
+                Element2D::Beam(Beam2D::new(1, [10, 20], DEFAULT_MATERIAL_ID, 100).expect("valid beam")),
+                Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section")),
+            )
             .expect("element should be added");
 
         let constraints = [(10, Dof2D::Ux, 0.0), (10, Dof2D::Rz, 0.01), (20, Dof2D::Uy, 0.0)];

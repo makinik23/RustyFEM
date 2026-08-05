@@ -8,15 +8,15 @@ use crate::model::{DofNumbering2D, Model2D};
 
 /// Assembles the global stiffness matrix for a given 2D finite element model.
 pub fn assemble_stiffness_matrix(model: &Model2D) -> Result<DMatrix<f64>, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
-
     let numbering = DofNumbering2D::from_model(model)?;
 
     let size = numbering.count();
     let mut global_matrix = DMatrix::<f64>::zeros(size, size);
 
     for element in model.elements() {
-        let element_matrix = element.stiffness_matrix(material, model.nodes())?;
+        let material = model.material(element.material_id())?;
+        let section = model.section(element.section_id())?;
+        let element_matrix = element.stiffness_matrix(material, section, model.nodes())?;
 
         let indices = numbering.element_dof_indices(element)?;
 
@@ -32,8 +32,6 @@ pub fn assemble_stiffness_matrix(model: &Model2D) -> Result<DMatrix<f64>, FemErr
 
 /// Assembles the global stiffness matrix in sparse CSR format.
 pub fn assemble_sparse_stiffness_matrix(model: &Model2D) -> Result<CsrMatrix, FemError> {
-    let material = model.material().ok_or(FemError::MissingMaterial)?;
-
     let numbering = DofNumbering2D::from_model(model)?;
     let size = numbering.count();
 
@@ -41,7 +39,9 @@ pub fn assemble_sparse_stiffness_matrix(model: &Model2D) -> Result<CsrMatrix, Fe
     let mut global_matrix = CooMatrix::new(size, size);
 
     for element in model.elements() {
-        let element_matrix = element.stiffness_matrix(material, model.nodes())?;
+        let material = model.material(element.material_id())?;
+        let section = model.section(element.section_id())?;
+        let element_matrix = element.stiffness_matrix(material, section, model.nodes())?;
         let indices = numbering.element_dof_indices(element)?;
 
         for (local_row, &global_row) in indices.iter().enumerate() {
@@ -61,17 +61,19 @@ pub fn assemble_sparse_stiffness_matrix(model: &Model2D) -> Result<CsrMatrix, Fe
 mod tests {
     use super::{assemble_sparse_stiffness_matrix, assemble_stiffness_matrix};
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
-    use crate::error::FemError;
-    use crate::model::{Material2D, Model2D, Node2D};
+    use crate::model::{
+        BeamSection2D, DEFAULT_MATERIAL_ID, Material2D, Model2D, Node2D, PlaneStressSection2D, Section2D,
+        TrussSection2D,
+    };
     use nalgebra::{DMatrix, DVector};
 
     #[test]
-    fn rejects_assembly_without_material() {
+    fn assembles_empty_model_without_material() {
         let model = Model2D::new();
 
-        let result = assemble_stiffness_matrix(&model);
+        let matrix = assemble_stiffness_matrix(&model).expect("empty matrix should be assembled");
 
-        assert!(matches!(result, Err(FemError::MissingMaterial)));
+        assert_eq!(matrix.shape(), (0, 0));
     }
 
     #[test]
@@ -83,8 +85,9 @@ mod tests {
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
-        let truss = Truss2D::new(10, [1, 2], 3.0).expect("valid truss should be created");
-        model.add_element(Element2D::Truss(truss)).expect("element should be added");
+        let truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(3.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Truss(truss), section).expect("element should be added");
 
         let actual = assemble_stiffness_matrix(&model).expect("global matrix should be assembled");
         let expected = DMatrix::from_row_slice(
@@ -109,8 +112,11 @@ mod tests {
                 .expect("node should be added");
         }
 
-        let first_truss = Truss2D::new(10, [1, 2], 3.0).expect("valid truss should be created");
-        let second_truss = Truss2D::new(20, [2, 3], 3.0).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(3.0).expect("valid section should be created"));
+        model.add_section(100, section).expect("section should be added");
+
+        let first_truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+        let second_truss = Truss2D::new(20, [2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
 
         model.add_element(Element2D::Truss(first_truss)).expect("first element should be added");
         model.add_element(Element2D::Truss(second_truss)).expect("second element should be added");
@@ -139,11 +145,17 @@ mod tests {
             model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
         }
 
-        let beam = Beam2D::new(10, [1, 2], 1.0, 1.0).expect("valid beam should be created");
-        let triangle = TriangleT3::new(20, [1, 2, 3], 1.0).expect("valid triangle should be created");
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let beam_section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        let triangle =
+            TriangleT3::new(20, [1, 2, 3], DEFAULT_MATERIAL_ID, 200).expect("valid triangle should be created");
+        let triangle_section =
+            Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section should be created"));
 
-        model.add_element(Element2D::Beam(beam)).expect("beam should be added");
-        model.add_element(Element2D::TriangleT3(triangle)).expect("triangle should be added");
+        model.add_element_with_section(Element2D::Beam(beam), beam_section).expect("beam should be added");
+        model
+            .add_element_with_section(Element2D::TriangleT3(triangle), triangle_section)
+            .expect("triangle should be added");
 
         let actual = assemble_stiffness_matrix(&model).expect("global matrix should be assembled");
 
@@ -188,9 +200,12 @@ mod tests {
                 .expect("node should be added");
         }
 
-        let first_truss = Truss2D::new(10, [1, 2], 3.0).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(3.0).expect("valid section should be created"));
+        model.add_section(100, section).expect("section should be added");
 
-        let second_truss = Truss2D::new(20, [2, 3], 3.0).expect("valid truss should be created");
+        let first_truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+
+        let second_truss = Truss2D::new(20, [2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
 
         model.add_element(Element2D::Truss(first_truss)).expect("first element should be added");
 

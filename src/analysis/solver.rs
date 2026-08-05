@@ -10,7 +10,7 @@ use crate::analysis::iterative_solver::{
 use crate::analysis::load_vector::assemble_load_vector;
 use crate::analysis::sparse::CsrMatrix;
 use crate::error::FemError;
-use crate::model::{DofNumbering2D, Model2D};
+use crate::model::{AnalysisSettings2D, DofNumbering2D, Model2D, SolverKind2D};
 
 /// Summarizes the iterative solver execution.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +56,23 @@ impl AnalysisResult2D {
     #[must_use]
     pub fn solver_report(&self) -> Option<&SolverReport> {
         self.solver_report.as_ref()
+    }
+}
+
+/// Solves a 2D model using the solver selected in its analysis settings.
+pub fn solve_with_settings(model: &Model2D) -> Result<AnalysisResult2D, FemError> {
+    match model.analysis_settings().solver() {
+        SolverKind2D::Dense => solve(model),
+        SolverKind2D::Sparse => solve_sparse_with_options(model, cg_options_from_settings(model.analysis_settings())),
+    }
+}
+
+fn cg_options_from_settings(settings: &AnalysisSettings2D) -> CgOptions {
+    CgOptions {
+        max_iterations: settings.cg_max_iterations(),
+        tolerance: settings.cg_tolerance(),
+        stagnation_window: settings.cg_stagnation_window(),
+        stagnation_tolerance: settings.cg_stagnation_tolerance(),
     }
 }
 
@@ -105,6 +122,10 @@ pub fn solve_linear_system(
 fn validate_linear_system_dimensions(
     stiffness_matrix: &DMatrix<f64>, load_vector_length: usize,
 ) -> Result<(), FemError> {
+    if stiffness_matrix.nrows() == 0 && stiffness_matrix.ncols() == 0 && load_vector_length == 0 {
+        return Err(FemError::SingularSystem);
+    }
+
     if stiffness_matrix.nrows() != stiffness_matrix.ncols() || stiffness_matrix.nrows() != load_vector_length {
         return Err(FemError::IncompatibleLinearSystem {
             stiffness_rows: stiffness_matrix.nrows(),
@@ -232,10 +253,13 @@ pub fn calculate_sparse_reactions(
 
 #[cfg(test)]
 mod tests {
-    use super::{solve, solve_linear_system, solve_sparse};
+    use super::{solve, solve_linear_system, solve_with_settings};
     use crate::elements::{Beam2D, Element2D, Truss2D};
     use crate::error::FemError;
-    use crate::model::{DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D};
+    use crate::model::{
+        BeamSection2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D,
+        Section2D, SolverKind2D, TrussSection2D,
+    };
     use approx::assert_relative_eq;
     use nalgebra::{DMatrix, DVector};
 
@@ -280,12 +304,12 @@ mod tests {
     }
 
     #[test]
-    fn model_solver_requires_material() {
+    fn model_solver_rejects_empty_model() {
         let model = Model2D::new();
 
         let result = solve(&model);
 
-        assert!(matches!(result, Err(FemError::MissingMaterial)));
+        assert!(matches!(result, Err(FemError::SingularSystem)));
     }
 
     #[test]
@@ -297,9 +321,10 @@ mod tests {
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
-        let truss = Truss2D::new(10, [1, 2], 2.0).expect("valid truss should be created");
+        let truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(2.0).expect("valid section should be created"));
 
-        model.add_element(Element2D::Truss(truss)).expect("element should be added");
+        model.add_element_with_section(Element2D::Truss(truss), section).expect("element should be added");
 
         for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (2, Dof2D::Uy)] {
             let constraint =
@@ -337,7 +362,12 @@ mod tests {
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
         model
-            .add_element(Element2D::Truss(Truss2D::new(10, [1, 2], 2.0).expect("valid truss should be created")))
+            .add_element_with_section(
+                Element2D::Truss(
+                    Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created"),
+                ),
+                Section2D::Truss(TrussSection2D::new(2.0).expect("valid section should be created")),
+            )
             .expect("element should be added");
 
         for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (2, Dof2D::Uy)] {
@@ -354,7 +384,10 @@ mod tests {
 
         let dense_result = solve(&model).expect("dense system should be solved");
 
-        let sparse_result = solve_sparse(&model).expect("sparse system should be solved");
+        model.analysis_settings_mut().set_solver(SolverKind2D::Sparse);
+        let sparse_result = solve_with_settings(&model).expect("sparse system should be solved");
+
+        assert!(sparse_result.solver_report().is_some());
 
         for (sparse, dense) in sparse_result.displacements().iter().zip(dense_result.displacements().iter()) {
             assert_relative_eq!(sparse, dense, epsilon = 1e-10);
@@ -374,9 +407,10 @@ mod tests {
         model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
         model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
 
-        let beam = Beam2D::new(10, [1, 2], 1.0, 2.0).expect("valid beam should be created");
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 2.0).expect("valid section should be created"));
 
-        model.add_element(Element2D::Beam(beam)).expect("element should be added");
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("element should be added");
 
         for dof in [Dof2D::Ux, Dof2D::Uy, Dof2D::Rz] {
             let constraint = DisplacementConstraint2D::new(1, dof, 0.0).expect("valid constraint should be created");

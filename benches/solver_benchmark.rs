@@ -6,7 +6,10 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rusty_fem::analysis::solver::{solve, solve_sparse};
 use rusty_fem::elements::{Element2D, TriangleT3};
-use rusty_fem::model::{DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D};
+use rusty_fem::model::{
+    DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D,
+    PlaneStressSection2D, Section2D,
+};
 
 /// Benchmarks a complete analysis for several rectangular T3 meshes.
 fn benchmark_solver_scaling(criterion: &mut Criterion) {
@@ -71,17 +74,27 @@ fn rectangular_t3_cantilever(nx: usize, ny: usize) -> Model2D {
             let upper_right = node_id(i + 1, j + 1);
             let upper_left = node_id(i, j + 1);
 
-            let first_triangle = TriangleT3::new(element_id, [lower_left, lower_right, upper_right], 1.0)
-                .expect("benchmark triangle should be valid");
+            let first_triangle =
+                TriangleT3::new(element_id, [lower_left, lower_right, upper_right], DEFAULT_MATERIAL_ID, element_id)
+                    .expect("benchmark triangle should be valid");
+            let first_section =
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("benchmark section should be valid"));
 
-            model.add_element(Element2D::TriangleT3(first_triangle)).expect("benchmark triangle should be added");
+            model
+                .add_element_with_section(Element2D::TriangleT3(first_triangle), first_section)
+                .expect("benchmark triangle should be added");
 
             element_id += 1;
 
-            let second_triangle = TriangleT3::new(element_id, [lower_left, upper_right, upper_left], 1.0)
-                .expect("benchmark triangle should be valid");
+            let second_triangle =
+                TriangleT3::new(element_id, [lower_left, upper_right, upper_left], DEFAULT_MATERIAL_ID, element_id)
+                    .expect("benchmark triangle should be valid");
+            let second_section =
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("benchmark section should be valid"));
 
-            model.add_element(Element2D::TriangleT3(second_triangle)).expect("benchmark triangle should be added");
+            model
+                .add_element_with_section(Element2D::TriangleT3(second_triangle), second_section)
+                .expect("benchmark triangle should be added");
 
             element_id += 1;
         }
