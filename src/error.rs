@@ -47,6 +47,15 @@ pub enum FemError {
     #[error("nodal load on node {node_id} has invalid value: {value}")]
     InvalidNodalLoad { node_id: usize, value: f64 },
 
+    #[error("element load {load_type} on element {element_id} has invalid {component}: {value}")]
+    InvalidElementLoadValue { element_id: usize, load_type: &'static str, component: &'static str, value: f64 },
+
+    #[error("element load {load_type} cannot be applied to {actual} element {element_id}; expected {expected}")]
+    InvalidElementLoadType { element_id: usize, load_type: &'static str, expected: &'static str, actual: &'static str },
+
+    #[error("element load {load_type} on element {element_id} has invalid edge {node_ids:?}; expected {expected}")]
+    InvalidElementLoadEdge { element_id: usize, load_type: &'static str, node_ids: Vec<usize>, expected: &'static str },
+
     #[error(
         "linear system has incompatible dimensions: stiffness matrix is {stiffness_rows}x{stiffness_columns}, load vector has length {load_vector_length}"
     )]

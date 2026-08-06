@@ -254,11 +254,12 @@ pub fn calculate_sparse_reactions(
 #[cfg(test)]
 mod tests {
     use super::{solve, solve_linear_system, solve_with_settings};
-    use crate::elements::{Beam2D, Element2D, Truss2D};
+    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{
-        BeamSection2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D,
-        Section2D, SolverKind2D, TrussSection2D,
+        BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D,
+        EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, Material2D, Model2D, NodalLoad2D, Node2D,
+        PlaneStressSection2D, Section2D, SelfWeight2D, SolverKind2D, TrussSection2D,
     };
     use approx::assert_relative_eq;
     use nalgebra::{DMatrix, DVector};
@@ -438,5 +439,161 @@ mod tests {
         assert_relative_eq!(reactions[3], 0.0, epsilon = 1e-12);
         assert_relative_eq!(reactions[4], 0.0, epsilon = 1e-12);
         assert_relative_eq!(reactions[5], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_cantilever_beam_with_uniform_line_load() {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 2.0).expect("valid section should be created"));
+
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("element should be added");
+
+        for dof in [Dof2D::Ux, Dof2D::Uy, Dof2D::Rz] {
+            let constraint = DisplacementConstraint2D::new(1, dof, 0.0).expect("valid constraint should be created");
+
+            model.add_constraint(constraint).expect("constraint should be added");
+        }
+
+        let load = ElementLoad2D::BeamUniformLine(
+            BeamUniformLineLoad2D::new(10, LoadCoordinateSystem2D::Local, 0.0, -12.0)
+                .expect("valid load should be created"),
+        );
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let solution = result.displacements();
+        let reactions = result.reactions();
+
+        assert_relative_eq!(solution[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(solution[1], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(solution[2], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(solution[3], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(solution[4], -0.00375, epsilon = 1e-12);
+        assert_relative_eq!(solution[5], -0.005, epsilon = 1e-12);
+
+        assert_relative_eq!(reactions[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(reactions[1], 12.0, epsilon = 1e-12);
+        assert_relative_eq!(reactions[2], 6.0, epsilon = 1e-12);
+        assert_relative_eq!(reactions[3], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(reactions[4], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(reactions[5], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_triangle_with_edge_traction_and_balances_reactions() {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(3, 0.0, 1.0).expect("valid node should be created")).expect("node should be added");
+
+        let triangle =
+            TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section should be created"));
+
+        model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("element should be added");
+
+        for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (2, Dof2D::Uy), (3, Dof2D::Ux)] {
+            let constraint =
+                DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint should be created");
+
+            model.add_constraint(constraint).expect("constraint should be added");
+        }
+
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 10.0, 0.0)
+                .expect("valid load should be created"),
+        );
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let total_edge_force = 10.0 * 2.0_f64.sqrt();
+        let x_reaction_sum = reactions[0] + reactions[4];
+        let y_reaction_sum = reactions[1] + reactions[3];
+
+        assert_relative_eq!(x_reaction_sum, -total_edge_force, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_triangle_with_body_force_and_balances_reactions() {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(3, 0.0, 1.0).expect("valid node should be created")).expect("node should be added");
+
+        let triangle =
+            TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section should be created"));
+
+        model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("element should be added");
+
+        for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (2, Dof2D::Uy), (3, Dof2D::Ux)] {
+            let constraint =
+                DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint should be created");
+
+            model.add_constraint(constraint).expect("constraint should be added");
+        }
+
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 10.0, 0.0).expect("valid load should be created"));
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let total_body_force = 10.0 * 0.5;
+        let x_reaction_sum = reactions[0] + reactions[4];
+        let y_reaction_sum = reactions[1] + reactions[3];
+
+        assert_relative_eq!(x_reaction_sum, -total_body_force, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_triangle_with_self_weight_and_balances_reactions() {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, 2.0).expect("valid material should be created"));
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(3, 0.0, 1.0).expect("valid node should be created")).expect("node should be added");
+
+        let triangle =
+            TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section should be created"));
+
+        model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("element should be added");
+
+        for (node_id, dof) in [(1, Dof2D::Ux), (1, Dof2D::Uy), (2, Dof2D::Uy), (3, Dof2D::Ux)] {
+            let constraint =
+                DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint should be created");
+
+            model.add_constraint(constraint).expect("constraint should be added");
+        }
+
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 10.0, 0.0).expect("valid load should be created"));
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let total_self_weight_force = 2.0 * 10.0 * 0.5;
+        let x_reaction_sum = reactions[0] + reactions[4];
+        let y_reaction_sum = reactions[1] + reactions[3];
+
+        assert_relative_eq!(x_reaction_sum, -total_self_weight_force, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 0.0, epsilon = 1e-12);
     }
 }

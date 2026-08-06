@@ -43,8 +43,9 @@ cargo run -- --space 2d --solver sparse \
   --cg-max-iterations 1000
 ```
 
-The program reads one material, then nodes, constraints, elements, and nodal
-loads. Enter `done` at the end of each group.
+The program reads materials, sections, nodes, constraints, elements, and loads.
+Loads can be entered as nodal loads or as uniform line loads on beam elements.
+Enter `done` at the end of each group.
 
 ## Beam Example
 
@@ -72,7 +73,8 @@ groups. You must enter:
 - nodes: node ID and `x`, `y` coordinates;
 - constraints: node ID, degree of freedom (`Ux`, `Uy`, or `Rz`), and prescribed displacement;
 - elements: element type, connectivity, and section properties;
-- loads: node ID, degree of freedom, and load value.
+- loads: either node ID, degree of freedom, and load value, or a uniform beam
+  line load.
 
 Enter `done` after each group to continue to the next prompt. For this beam,
 the interactive session looks like this:
@@ -112,6 +114,95 @@ sigma(y)  = N / A - M(x) y / I Pa
 
 At the fixed end, `M(0) = -12 N m` and `y = +/- h/2 = +/- 1 m`, so the
 recovered fiber stresses are `+6 Pa` and `-6 Pa`.
+
+## Uniform Beam Line Loads
+
+Uniform line loads can be applied to beam elements with:
+
+```text
+beam_uniform ELEMENT_ID local|global QX QY
+```
+
+`QX` and `QY` are force per unit beam length. With `local`, `QX` acts along the
+beam axis and `QY` acts in the local transverse direction. With `global`, the
+components are interpreted in the model x/y axes and transformed to the beam's
+local axes during load-vector assembly.
+
+For the beam example above, a downward uniform local load of `-12 N/m` is:
+
+```text
+load> beam_uniform 10 local 0 -12
+```
+
+The solver converts this load into the consistent equivalent nodal load vector.
+Beam end-force and section-response recovery also include the fixed-end force
+contribution from the uniform load.
+
+## T3 Edge Tractions
+
+Uniform tractions can be applied to one edge of a T3 plane-stress element with:
+
+```text
+edge_traction ELEMENT_ID NODE_A NODE_B local|global TX TY
+```
+
+`NODE_A` and `NODE_B` must be the two nodes of one edge of the selected
+triangle. `TX` and `TY` are force per unit area. The solver multiplies them by
+the plane-stress thickness and edge length, then distributes half of the
+resulting force to each edge node.
+
+With `global`, the components are interpreted in the model x/y axes. With
+`local`, `TX` acts from `NODE_A` toward `NODE_B`, and `TY` acts in the edge
+normal direction.
+
+For example, this applies a downward global traction on edge `2-3` of triangle
+element `20`:
+
+```text
+load> edge_traction 20 2 3 global 0 -1000
+```
+
+## T3 Body Forces
+
+Uniform body forces can be applied over the full area and thickness of a T3
+plane-stress element with:
+
+```text
+body_force ELEMENT_ID global BX BY
+```
+
+`BX` and `BY` are force per unit volume in the model x/y axes. The solver
+multiplies them by the element area and plane-stress thickness, then
+distributes one third of the resulting force to each triangle node.
+
+For example, this applies a downward body force to triangle element `20`:
+
+```text
+load> body_force 20 global 0 -9810
+```
+
+This is an explicitly supplied body-force intensity. Use `self_weight` when the
+load should be calculated from material density.
+
+## T3 Self-Weight Loads
+
+Self-weight loads can be applied over the full area and thickness of a T3
+plane-stress element with:
+
+```text
+self_weight ELEMENT_ID global AX AY
+```
+
+`AX` and `AY` are acceleration components in the model x/y axes. The solver
+multiplies them by the element material density, area, and plane-stress
+thickness, then distributes one third of the resulting force to each triangle
+node.
+
+For example, this applies gravity in the negative global y direction:
+
+```text
+load> self_weight 20 global 0 -9.81
+```
 
 ## T3 Triangle Mesh Benchmark
 
