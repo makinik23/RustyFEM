@@ -22,7 +22,20 @@ behind the implemented formulations.
 - Displacements and rotations are assumed to be small.
 - Geometric nonlinearity, large rotations, contact, buckling, dynamics, and
   time-dependent effects are not implemented.
-- Loads are applied as nodal loads.
+- Loads can be applied as nodal loads, uniform line loads on 2D beam elements,
+  uniform edge tractions on T3 plane-stress elements, or uniform body forces
+  and self-weight loads on T3 plane-stress elements.
+- Uniform beam line loads are converted to consistent equivalent nodal loads
+  before solving. They can be defined in the beam's local axis system or in the
+  model's global x/y axis system.
+- T3 edge tractions are converted to equivalent nodal loads before solving.
+  They can be defined in the global x/y axis system or in an edge-local system
+  whose x-axis runs from the first specified edge node to the second.
+- T3 body forces are converted to equivalent nodal loads before solving. They
+  are defined as force per unit volume in the global x/y axis system.
+- T3 self-weight loads are converted to equivalent nodal loads before solving.
+  They are defined as acceleration in the global x/y axis system and are
+  multiplied by the loaded element material density.
 - Boundary conditions are prescribed nodal displacements, including zero
   displacement supports.
 - The global stiffness matrix is assembled in the model's global degrees of
@@ -50,6 +63,8 @@ behind the implemented formulations.
   element.
 - The formulation supports axial force, shear force, bending moment,
   curvature, and recovered top/bottom fiber stress.
+- Uniform line loads on beams are included in equivalent nodal loads and in
+  fixed-end force recovery for beam end forces and section moments.
 
 ## Plane-Stress T3 Triangle
 
@@ -62,9 +77,18 @@ behind the implemented formulations.
 - Thickness is constant and the element has no independent bending DOF.
 - The element uses isotropic linear elasticity and can recover in-plane strain,
   stress, and von Mises stress.
+- Uniform edge tractions can be applied to any one of the three T3 edges. The
+  total edge force is `traction * thickness * edge_length` and is distributed
+  equally to the two edge nodes.
+- Uniform body forces can be applied over the whole T3 element. The total body
+  force is `body_force * area * thickness` and is distributed equally to the
+  three element nodes.
+- Self-weight loads can be applied over the whole T3 element. The total force
+  is `density * acceleration * area * thickness` and is distributed equally to
+  the three element nodes.
 
 ## Current Limitations
 
 - The 3D analysis mode is recognized by the CLI but is not implemented yet.
-- Body forces, inertia, dynamics, and non-nodal load distributions are not
-  implemented.
+- Inertia, dynamics, nonuniform load distributions, and higher-order
+  surface/edge tractions are not implemented.

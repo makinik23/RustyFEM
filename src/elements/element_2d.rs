@@ -374,6 +374,16 @@ impl Element2D {
         }
     }
 
+    /// Returns the element type name for diagnostics.
+    #[must_use]
+    pub fn element_type(&self) -> &'static str {
+        match self {
+            Self::Truss(_) => "truss",
+            Self::Beam(_) => "beam",
+            Self::TriangleT3(_) => "triangle_t3",
+        }
+    }
+
     /// Returns the node IDs associated with the element.
     pub fn node_ids(&self) -> &[usize] {
         match self {
@@ -517,11 +527,12 @@ mod tests {
     #[test]
     fn creates_valid_elements() {
         let cases = [
-            ("truss", Truss2D::new(10, [1, 2], 90, 100).map(Element2D::Truss), 10, 90, 100, vec![1, 2]),
-            ("beam", Beam2D::new(20, [2, 3], 91, 200).map(Element2D::Beam), 20, 91, 200, vec![2, 3]),
+            ("truss", Truss2D::new(10, [1, 2], 90, 100).map(Element2D::Truss), "truss", 10, 90, 100, vec![1, 2]),
+            ("beam", Beam2D::new(20, [2, 3], 91, 200).map(Element2D::Beam), "beam", 20, 91, 200, vec![2, 3]),
             (
                 "triangle",
                 TriangleT3::new(30, [3, 4, 5], 92, 300).map(Element2D::TriangleT3),
+                "triangle_t3",
                 30,
                 92,
                 300,
@@ -529,10 +540,20 @@ mod tests {
             ),
         ];
 
-        for (name, result, expected_element_id, expected_material_id, expected_section_id, expected_node_ids) in cases {
+        for (
+            name,
+            result,
+            expected_element_type,
+            expected_element_id,
+            expected_material_id,
+            expected_section_id,
+            expected_node_ids,
+        ) in cases
+        {
             let element = result.expect("valid element should be created");
 
             assert_eq!(element.id(), expected_element_id, "failed case: {name}");
+            assert_eq!(element.element_type(), expected_element_type, "failed case: {name}");
             assert_eq!(element.material_id(), expected_material_id, "failed case: {name}");
             assert_eq!(element.section_id(), expected_section_id, "failed case: {name}");
 

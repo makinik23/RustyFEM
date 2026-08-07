@@ -4,6 +4,7 @@ pub mod boundary_conditions;
 pub mod constraint;
 pub mod dof;
 pub mod dof_numbering;
+pub mod element_load;
 pub mod loads;
 pub mod material_model;
 pub mod materials;
@@ -19,6 +20,9 @@ pub use boundary_conditions::BoundaryConditions2D;
 pub use constraint::DisplacementConstraint2D;
 pub use dof::Dof2D;
 pub use dof_numbering::DofNumbering2D;
+pub use element_load::{
+    BeamUniformLineLoad2D, BodyForce2D, EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, SelfWeight2D,
+};
 pub use loads::Loads2D;
 pub use material_model::Material2D;
 pub use materials::{DEFAULT_MATERIAL_ID, Materials2D};

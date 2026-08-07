@@ -2,6 +2,8 @@
 
 use super::AnalysisSettings2D;
 use super::BoundaryConditions2D;
+use super::EdgeTraction2D;
+use super::ElementLoad2D;
 use super::Loads2D;
 use super::Materials2D;
 use super::Mesh2D;
@@ -113,6 +115,11 @@ impl Model2D {
         self.mesh.node(node_id).ok_or(FemError::UnknownId { entity: "node", id: node_id })
     }
 
+    /// Finds an element in the model by its ID.
+    fn find_element(&self, element_id: usize) -> Result<&Element2D, FemError> {
+        self.mesh.element(element_id).ok_or(FemError::UnknownId { entity: "element", id: element_id })
+    }
+
     /// Validates the geometry of an element. Returns an error if the element is degenerate (e.g., zero length for trusses and beams, or zero area for triangles).
     fn validate_element_geometry(&self, element: &Element2D) -> Result<(), FemError> {
         let node_ids = element.node_ids();
@@ -171,6 +178,46 @@ impl Model2D {
         self.loads.push_nodal_load(load);
 
         Ok(())
+    }
+
+    /// Adds an element load to the model.
+    pub fn add_element_load(&mut self, load: ElementLoad2D) -> Result<(), FemError> {
+        let element = self.find_element(load.element_id())?;
+
+        Self::validate_element_load(&load, element)?;
+
+        self.loads.push_element_load(load);
+
+        Ok(())
+    }
+
+    fn validate_element_load(load: &ElementLoad2D, element: &Element2D) -> Result<(), FemError> {
+        if element.element_type() != load.expected_element_type() {
+            return Err(FemError::InvalidElementLoadType {
+                element_id: load.element_id(),
+                load_type: load.load_type(),
+                expected: load.expected_element_type(),
+                actual: element.element_type(),
+            });
+        }
+
+        match load {
+            ElementLoad2D::BeamUniformLine(_) => Ok(()),
+            ElementLoad2D::EdgeTraction(load) => {
+                if !is_element_edge(element.node_ids(), load.edge_node_ids()) {
+                    return Err(FemError::InvalidElementLoadEdge {
+                        element_id: load.element_id(),
+                        load_type: EdgeTraction2D::LOAD_TYPE,
+                        node_ids: load.edge_node_ids().to_vec(),
+                        expected: "one of the triangle's three edges",
+                    });
+                }
+
+                Ok(())
+            }
+            ElementLoad2D::BodyForce(_) => Ok(()),
+            ElementLoad2D::SelfWeight(_) => Ok(()),
+        }
     }
 
     /// Returns a slice of all nodes in the model.
@@ -240,6 +287,12 @@ impl Model2D {
         self.loads.nodal_loads()
     }
 
+    /// Returns a slice of all element loads in the model.
+    #[must_use]
+    pub fn element_loads(&self) -> &[ElementLoad2D] {
+        self.loads.element_loads()
+    }
+
     /// Returns the analysis settings for the model.
     #[must_use]
     pub fn analysis_settings(&self) -> &AnalysisSettings2D {
@@ -252,14 +305,27 @@ impl Model2D {
     }
 }
 
+fn is_element_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> bool {
+    element_node_ids
+        .iter()
+        .copied()
+        .zip(element_node_ids.iter().copied().cycle().skip(1))
+        .take(element_node_ids.len())
+        .any(|(first, second)| {
+            (edge_node_ids[0] == first && edge_node_ids[1] == second)
+                || (edge_node_ids[0] == second && edge_node_ids[1] == first)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::Model2D;
     use crate::FemError;
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::model::{
-        DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, NodalLoad2D, Node2D, Section2D, SolverKind2D,
-        TrussSection2D,
+        BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D,
+        EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, Material2D, NodalLoad2D, Node2D, PlaneStressSection2D,
+        Section2D, SelfWeight2D, SolverKind2D, TrussSection2D,
     };
 
     #[test]
@@ -269,6 +335,8 @@ mod tests {
         assert!(model.nodes().is_empty());
         assert!(model.constraints().is_empty());
         assert!(model.elements().is_empty());
+        assert!(model.loads().is_empty());
+        assert!(model.element_loads().is_empty());
         assert!(model.sections().sections().is_empty());
         assert!(model.materials().materials().is_empty());
         assert!(model.default_material().is_none());
@@ -374,6 +442,224 @@ mod tests {
         assert_eq!(model.loads().len(), 2);
         assert_eq!(model.loads()[0], first_load);
         assert_eq!(model.loads()[1], second_load);
+    }
+
+    #[test]
+    fn adds_element_load_for_matching_element_type() {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
+
+        let load = ElementLoad2D::BeamUniformLine(
+            BeamUniformLineLoad2D::new(10, LoadCoordinateSystem2D::Local, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("element load should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn rejects_element_load_for_unknown_element() {
+        let mut model = Model2D::new();
+        let load = ElementLoad2D::BeamUniformLine(
+            BeamUniformLineLoad2D::new(99, LoadCoordinateSystem2D::Local, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(result, Err(FemError::UnknownId { entity: "element", id: 99 })));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn rejects_element_load_for_wrong_element_type() {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let truss = Truss2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid truss should be created");
+        let section = Section2D::Truss(TrussSection2D::new(1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Truss(truss), section).expect("truss should be added");
+
+        let load = ElementLoad2D::BeamUniformLine(
+            BeamUniformLineLoad2D::new(10, LoadCoordinateSystem2D::Local, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadType {
+                element_id: 10,
+                load_type: "beam_uniform_line",
+                expected: "beam",
+                actual: "truss",
+            })
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_edge_traction_for_triangle_edge() {
+        let mut model = triangle_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("edge traction should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn accepts_edge_traction_with_reversed_triangle_edge_nodes() {
+        let mut model = triangle_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [3, 2], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("edge traction should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn rejects_edge_traction_for_non_edge_triangle_node_pair() {
+        let mut model = triangle_model();
+        model.add_node(Node2D::new(4, 2.0, 2.0).expect("valid node should be created")).expect("node should be added");
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [1, 4], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadEdge {
+                element_id: 10,
+                load_type: "edge_traction",
+                node_ids,
+                expected: "one of the triangle's three edges",
+            }) if node_ids == vec![1, 4]
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn rejects_edge_traction_for_wrong_element_type() {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
+
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [1, 2], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadType {
+                element_id: 10,
+                load_type: "edge_traction",
+                expected: "triangle_t3",
+                actual: "beam",
+            })
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_body_force_for_triangle() {
+        let mut model = triangle_model();
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 0.0, -5.0).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("body force should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn rejects_body_force_for_wrong_element_type() {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
+
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 0.0, -5.0).expect("valid load should be created"));
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadType {
+                element_id: 10,
+                load_type: "body_force",
+                expected: "triangle_t3",
+                actual: "beam",
+            })
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_self_weight_for_triangle() {
+        let mut model = triangle_model();
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 0.0, -9.81).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("self-weight load should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn rejects_self_weight_for_wrong_element_type() {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 1.0, 0.0).expect("valid node should be created")).expect("node should be added");
+
+        let beam = Beam2D::new(10, [1, 2], DEFAULT_MATERIAL_ID, 100).expect("valid beam should be created");
+        let section = Section2D::Beam(BeamSection2D::new(1.0, 1.0).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::Beam(beam), section).expect("beam should be added");
+
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 0.0, -9.81).expect("valid load should be created"));
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadType {
+                element_id: 10,
+                load_type: "self_weight",
+                expected: "triangle_t3",
+                actual: "beam",
+            })
+        ));
+        assert!(model.element_loads().is_empty());
     }
 
     #[test]
@@ -509,5 +795,21 @@ mod tests {
 
         assert_eq!(model.default_material(), Some(&second));
         assert_eq!(model.material(DEFAULT_MATERIAL_ID).expect("default material should exist"), &second);
+    }
+
+    fn triangle_model() -> Model2D {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        model.add_node(Node2D::new(1, 0.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(2, 2.0, 0.0).expect("valid node should be created")).expect("node should be added");
+        model.add_node(Node2D::new(3, 0.0, 1.0).expect("valid node should be created")).expect("node should be added");
+
+        let triangle =
+            TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("triangle should be added");
+
+        model
     }
 }

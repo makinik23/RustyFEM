@@ -45,6 +45,12 @@ impl Mesh2D {
         self.nodes.iter().find(|node| node.id() == node_id)
     }
 
+    /// Finds an element by ID.
+    #[must_use]
+    pub(crate) fn element(&self, element_id: usize) -> Option<&Element2D> {
+        self.elements.iter().find(|element| element.id() == element_id)
+    }
+
     /// Checks whether an element ID already exists.
     #[must_use]
     pub(crate) fn contains_element_id(&self, element_id: usize) -> bool {
@@ -119,6 +125,18 @@ mod tests {
         mesh.push_element(second);
 
         assert_eq!(mesh.elements(), &[first, second]);
+    }
+
+    #[test]
+    fn finds_element_by_id() {
+        let mut mesh = Mesh2D::new();
+
+        let element = Element2D::Truss(Truss2D::new(100, [1, 2], 1, 10).expect("valid truss"));
+
+        mesh.push_element(element);
+
+        assert_eq!(mesh.element(100), Some(&element));
+        assert!(mesh.element(999).is_none());
     }
 
     #[test]

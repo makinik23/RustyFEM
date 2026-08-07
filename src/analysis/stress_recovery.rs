@@ -3,12 +3,12 @@
 use nalgebra::DVector;
 
 use crate::elements::interpolation::{
-    cubic_hermite_first_derivatives, cubic_hermite_second_derivatives, cubic_hermite_shape_functions,
-    linear_lagrange_shape_functions, triangle_t3_shape_functions,
+    cubic_hermite_first_derivatives, cubic_hermite_shape_functions, linear_lagrange_shape_functions,
+    triangle_t3_shape_functions,
 };
 use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
 use crate::error::FemError;
-use crate::model::{BeamSection2D, DofNumbering2D, Material2D, Model2D, Node2D, TrussSection2D};
+use crate::model::{BeamSection2D, DofNumbering2D, ElementLoad2D, Material2D, Model2D, Node2D, TrussSection2D};
 
 /// Position used when interpolating a displacement field inside a 2D element.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -226,14 +226,21 @@ pub fn recover_beam_response(
 ) -> Result<BeamResponse2D, FemError> {
     let material = model.material(beam.material_id())?;
     let section = model.beam_section(beam.section_id())?;
-    let (local_displacements, length) = extract_beam_local_displacements(model, beam, global_displacements)?;
+    let (local_displacements, length, cosine, sine) =
+        extract_beam_local_displacements(model, beam, global_displacements)?;
+    let mut response = calculate_beam_end_forces(beam, material, section, length, local_displacements);
+    let equivalent_loads = beam_equivalent_local_element_loads(model, beam, length, cosine, sine);
 
-    Ok(calculate_beam_end_forces(beam, material, section, length, local_displacements))
+    for (end_force, equivalent_load) in response.end_forces.iter_mut().zip(equivalent_loads) {
+        *end_force -= equivalent_load;
+    }
+
+    Ok(response)
 }
 
 fn extract_beam_local_displacements(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>,
-) -> Result<([f64; 6], f64), FemError> {
+) -> Result<([f64; 6], f64, f64, f64), FemError> {
     let numbering = DofNumbering2D::from_model(model)?;
 
     if global_displacements.len() != numbering.count() {
@@ -266,7 +273,7 @@ fn extract_beam_local_displacements(
         global_displacements[5],
     ];
 
-    Ok((local_displacements, length))
+    Ok((local_displacements, length, cosine, sine))
 }
 
 fn calculate_beam_end_forces(
@@ -284,6 +291,58 @@ fn calculate_beam_end_forces(
     }
 
     BeamResponse2D { end_forces }
+}
+
+fn beam_element_id(beam: &Beam2D) -> usize {
+    Element2D::Beam(*beam).id()
+}
+
+fn beam_equivalent_local_element_loads(
+    model: &Model2D, beam: &Beam2D, length: f64, cosine: f64, sine: f64,
+) -> [f64; 6] {
+    let mut loads = [0.0; 6];
+    let beam_id = beam_element_id(beam);
+
+    for load in model.element_loads() {
+        match load {
+            ElementLoad2D::BeamUniformLine(load) if load.element_id() == beam_id => {
+                let equivalent_load = load.local_equivalent_nodal_load(length, cosine, sine);
+
+                for (total, value) in loads.iter_mut().zip(equivalent_load) {
+                    *total += value;
+                }
+            }
+            ElementLoad2D::BeamUniformLine(_) => {}
+            ElementLoad2D::EdgeTraction(_) => {}
+            ElementLoad2D::BodyForce(_) => {}
+            ElementLoad2D::SelfWeight(_) => {}
+        }
+    }
+
+    loads
+}
+
+fn beam_uniform_local_load_resultants(model: &Model2D, beam: &Beam2D, cosine: f64, sine: f64) -> (f64, f64) {
+    let mut axial = 0.0;
+    let mut transverse = 0.0;
+    let beam_id = beam_element_id(beam);
+
+    for load in model.element_loads() {
+        match load {
+            ElementLoad2D::BeamUniformLine(load) if load.element_id() == beam_id => {
+                let (x_component, y_component) = load.local_components(cosine, sine);
+
+                axial += x_component;
+                transverse += y_component;
+            }
+            ElementLoad2D::BeamUniformLine(_) => {}
+            ElementLoad2D::EdgeTraction(_) => {}
+            ElementLoad2D::BodyForce(_) => {}
+            ElementLoad2D::SelfWeight(_) => {}
+        }
+    }
+
+    (axial, transverse)
 }
 
 /// Interpolated local beam displacement at a physical position measured from
@@ -366,16 +425,17 @@ pub fn recover_beam_section_response(
 ) -> Result<BeamSectionResponse2D, FemError> {
     let material = model.material(beam.material_id())?;
     let section = model.beam_section(beam.section_id())?;
-    let (local_displacements, length) = extract_beam_local_displacements(model, beam, global_displacements)?;
-    let axial_strain = (local_displacements[3] - local_displacements[0]) / length;
-    let axial_force = material.young_modulus() * section.cross_section_area() * axial_strain;
-    let xi = normalized_two_node_position(position, length)?;
-    let second_derivatives = cubic_hermite_second_derivatives(xi, length)?;
-    let curvature = second_derivatives[0] * local_displacements[1]
-        + second_derivatives[1] * local_displacements[2]
-        + second_derivatives[2] * local_displacements[4]
-        + second_derivatives[3] * local_displacements[5];
-    let bending_moment = material.young_modulus() * section.second_moment_of_area() * curvature;
+    let (_, length, cosine, sine) = extract_beam_local_displacements(model, beam, global_displacements)?;
+    normalized_two_node_position(position, length)?;
+    let response = recover_beam_response(model, beam, global_displacements)?;
+    let (distributed_axial_load, distributed_transverse_load) =
+        beam_uniform_local_load_resultants(model, beam, cosine, sine);
+    let axial_force = -response.first_axial_force() + distributed_axial_load * position;
+    let axial_strain = axial_force / (material.young_modulus() * section.cross_section_area());
+    let bending_moment = -response.first_bending_moment()
+        + response.first_shear_force() * position
+        + distributed_transverse_load * position.powi(2) / 2.0;
+    let curvature = bending_moment / (material.young_modulus() * section.second_moment_of_area());
 
     Ok(BeamSectionResponse2D {
         axial_strain,
@@ -391,7 +451,7 @@ pub fn recover_beam_section_response(
 pub fn interpolate_beam_displacement(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>, position: f64,
 ) -> Result<BeamDisplacement2D, FemError> {
-    let (local_displacements, length) = extract_beam_local_displacements(model, beam, global_displacements)?;
+    let (local_displacements, length, _, _) = extract_beam_local_displacements(model, beam, global_displacements)?;
     let xi = normalized_two_node_position(position, length)?;
     let axial_shape_functions = linear_lagrange_shape_functions(xi);
     let transverse_shape_functions = cubic_hermite_shape_functions(xi, length)?;
@@ -676,8 +736,9 @@ mod tests {
     use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{
-        BeamSection2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, Material2D, Model2D, NodalLoad2D, Node2D,
-        PlaneStressSection2D, Section2D, TrussSection2D,
+        BeamSection2D, BeamUniformLineLoad2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, ElementLoad2D,
+        LoadCoordinateSystem2D, Material2D, Model2D, NodalLoad2D, Node2D, PlaneStressSection2D, Section2D,
+        TrussSection2D,
     };
     use approx::assert_relative_eq;
     use nalgebra::DVector;
@@ -1040,6 +1101,46 @@ mod tests {
         assert_relative_eq!(response.second_axial_force(), 0.0, epsilon = 1e-12);
         assert_relative_eq!(response.second_shear_force(), -12.0, epsilon = 1e-12);
         assert_relative_eq!(response.second_bending_moment(), 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn recovers_fixed_end_forces_for_uniform_beam_line_load() {
+        let mut model = horizontal_beam_model();
+
+        for node_id in [1, 2] {
+            for dof in [Dof2D::Ux, Dof2D::Uy, Dof2D::Rz] {
+                model
+                    .add_constraint(DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint"))
+                    .expect("constraint should be added");
+            }
+        }
+
+        let load = ElementLoad2D::BeamUniformLine(
+            BeamUniformLineLoad2D::new(10, LoadCoordinateSystem2D::Local, 0.0, -12.0)
+                .expect("valid load should be created"),
+        );
+        model.add_element_load(load).expect("element load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let beam = match model.elements()[0] {
+            Element2D::Beam(beam) => beam,
+            _ => panic!("expected a beam element"),
+        };
+        let response =
+            recover_beam_response(&model, &beam, result.displacements()).expect("response should be recovered");
+
+        assert_relative_eq!(response.first_axial_force(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(response.first_shear_force(), 6.0, epsilon = 1e-12);
+        assert_relative_eq!(response.first_bending_moment(), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(response.second_axial_force(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(response.second_shear_force(), 6.0, epsilon = 1e-12);
+        assert_relative_eq!(response.second_bending_moment(), -1.0, epsilon = 1e-12);
+
+        let midpoint = recover_beam_section_response(&model, &beam, result.displacements(), 0.5)
+            .expect("section response should be recovered");
+
+        assert_relative_eq!(midpoint.bending_moment(), 0.5, epsilon = 1e-12);
+        assert_relative_eq!(midpoint.curvature(), 0.5 / 400.0, epsilon = 1e-12);
     }
 
     #[test]
