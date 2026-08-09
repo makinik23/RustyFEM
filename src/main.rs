@@ -5,7 +5,7 @@ use rusty_fem::FemError;
 use rusty_fem::analysis::iterative_solver::CgTerminationReason;
 use rusty_fem::analysis::solver::{AnalysisResult2D, solve_with_settings};
 use rusty_fem::analysis::{ElementResponse2D, recover_beam_section_response, recover_model_responses};
-use rusty_fem::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+use rusty_fem::elements::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D};
 use rusty_fem::model::{
     AnalysisSpace, BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DisplacementConstraint2D, Dof2D, DofNumbering2D,
     EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, Material2D, Model2D, NodalLoad2D, Node2D,
@@ -239,6 +239,7 @@ fn read_elements(model: &mut Model2D) -> io::Result<()> {
     println!("  truss ID NODE_1 NODE_2 MATERIAL_ID SECTION_ID");
     println!("  beam ID NODE_1 NODE_2 MATERIAL_ID SECTION_ID");
     println!("  triangle ID NODE_1 NODE_2 NODE_3 MATERIAL_ID SECTION_ID");
+    println!("  q4 ID NODE_1 NODE_2 NODE_3 NODE_4 MATERIAL_ID SECTION_ID");
     println!("Type 'done' when finished.");
 
     loop {
@@ -270,11 +271,11 @@ fn read_loads(model: &mut Model2D) -> io::Result<()> {
     println!();
     println!("Enter nodal loads as: NODE_ID DOF VALUE");
     println!("Enter uniform beam line loads as: beam_uniform ELEMENT_ID local|global QX QY");
-    println!("Enter T3 edge tractions as: edge_traction ELEMENT_ID NODE_A NODE_B local|global TX TY");
-    println!("Enter T3 body forces as: body_force ELEMENT_ID global BX BY");
-    println!("Enter T3 self-weight loads as: self_weight ELEMENT_ID global AX AY");
+    println!("Enter plane-stress edge tractions as: edge_traction ELEMENT_ID NODE_A NODE_B local|global TX TY");
+    println!("Enter plane-stress body forces as: body_force ELEMENT_ID global BX BY");
+    println!("Enter plane-stress self-weight loads as: self_weight ELEMENT_ID global AX AY");
     println!(
-        "DOF must be Ux, Uy, or Rz. Beam loads are force per unit length; T3 loads use force per unit area or volume."
+        "DOF must be Ux, Uy, or Rz. Beam loads are force per unit length; plane-stress loads use force per unit area or volume."
     );
     println!("Type 'done' when finished.");
 
@@ -375,6 +376,24 @@ fn print_element_response(element_id: usize, response: ElementResponse2D) {
 
             println!(
                 "  element {element_id} triangle: strain = [{:.12}, {:.12}, {:.12}], stress = [{:.12}, {:.12}, {:.12}], von_mises = {:.12}",
+                strain[0],
+                strain[1],
+                strain[2],
+                stress[0],
+                stress[1],
+                stress[2],
+                response.von_mises_stress(),
+            );
+        }
+        ElementResponse2D::Quadrilateral(response) => {
+            let (xi, eta) = response.natural_coordinates();
+            let strain = response.strain();
+            let stress = response.stress();
+
+            println!(
+                "  element {element_id} quad_q4 at (xi={:.12}, eta={:.12}): strain = [{:.12}, {:.12}, {:.12}], stress = [{:.12}, {:.12}, {:.12}], von_mises = {:.12}",
+                xi,
+                eta,
                 strain[0],
                 strain[1],
                 strain[2],
@@ -642,7 +661,7 @@ fn parse_section_line(line: &str) -> Result<(usize, Section2D), String> {
 
             Ok((id, section))
         }
-        "plane_stress" | "plane-stress" | "triangle" | "triangle_t3" | "t3" => {
+        "plane_stress" | "plane-stress" | "triangle" | "triangle_t3" | "t3" | "quad" | "quad_q4" | "q4" => {
             if parts.len() != 3 {
                 return Err("expected: plane_stress ID THICKNESS".to_owned());
             }
@@ -712,7 +731,24 @@ fn parse_element_line(line: &str) -> Result<Element2D, String> {
                 .map(Element2D::TriangleT3)
                 .map_err(|error| error.to_string())
         }
-        _ => Err("unknown element type; use truss, beam, or triangle".to_owned()),
+        "quad" | "quad_q4" | "q4" => {
+            if parts.len() != 8 {
+                return Err("expected: q4 ID NODE_1 NODE_2 NODE_3 NODE_4 MATERIAL_ID SECTION_ID".to_owned());
+            }
+
+            let id = parse_usize(parts[1], "element ID")?;
+            let first_node_id = parse_usize(parts[2], "first node ID")?;
+            let second_node_id = parse_usize(parts[3], "second node ID")?;
+            let third_node_id = parse_usize(parts[4], "third node ID")?;
+            let fourth_node_id = parse_usize(parts[5], "fourth node ID")?;
+            let material_id = parse_usize(parts[6], "material ID")?;
+            let section_id = parse_usize(parts[7], "section ID")?;
+
+            QuadQ4::new(id, [first_node_id, second_node_id, third_node_id, fourth_node_id], material_id, section_id)
+                .map(Element2D::QuadQ4)
+                .map_err(|error| error.to_string())
+        }
+        _ => Err("unknown element type; use truss, beam, triangle, or q4".to_owned()),
     }
 }
 
@@ -910,6 +946,7 @@ mod tests {
         let beam = parse_section_line("beam 15 0.02 0.001 0.1").expect("valid beam section should be parsed");
         let plane_stress =
             parse_section_line("plane_stress 20 0.1").expect("valid plane-stress section should be parsed");
+        let q4 = parse_section_line("q4 25 0.2").expect("valid Q4 plane-stress section should be parsed");
 
         assert!(matches!(truss, (10, Section2D::Truss(_))));
         assert!(matches!(
@@ -917,6 +954,7 @@ mod tests {
             (15, Section2D::Beam(section)) if section.section_height() == Some(0.1)
         ));
         assert!(matches!(plane_stress, (20, Section2D::PlaneStress(_))));
+        assert!(matches!(q4, (25, Section2D::PlaneStress(_))));
     }
 
     #[test]
@@ -933,6 +971,7 @@ mod tests {
         let truss = parse_element_line("truss 10 1 2 7 100").expect("valid truss should be parsed");
         let beam = parse_element_line("beam 15 1 2 8 200").expect("valid beam should be parsed");
         let triangle = parse_element_line("triangle 20 1 2 3 9 300").expect("valid triangle should be parsed");
+        let quad = parse_element_line("q4 25 1 2 3 4 10 400").expect("valid quad should be parsed");
 
         assert!(
             matches!(truss, Element2D::Truss(element) if element.material_id() == 7 && element.section_id() == 100)
@@ -940,6 +979,9 @@ mod tests {
         assert!(matches!(beam, Element2D::Beam(element) if element.material_id() == 8 && element.section_id() == 200));
         assert!(
             matches!(triangle, Element2D::TriangleT3(element) if element.material_id() == 9 && element.section_id() == 300)
+        );
+        assert!(
+            matches!(quad, Element2D::QuadQ4(element) if element.material_id() == 10 && element.section_id() == 400)
         );
     }
 
@@ -950,6 +992,7 @@ mod tests {
         assert!(parse_element_line("beam 10 1 2 7").is_err());
         assert!(parse_element_line("truss 10 1 2").is_err());
         assert!(parse_element_line("triangle 10 1 2 3 7").is_err());
+        assert!(parse_element_line("q4 10 1 2 3 4 7").is_err());
         assert!(parse_element_line("hexagon 10 1 2").is_err());
     }
 }

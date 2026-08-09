@@ -13,6 +13,9 @@ pub enum Interpolation {
 
     /// Linear interpolation over a three-node triangle.
     LinearTriangleT3,
+
+    /// Bilinear interpolation over a four-node quadrilateral.
+    BilinearQuadQ4,
 }
 
 /// Returns the two linear Lagrange shape functions evaluated at `xi`.
@@ -37,6 +40,30 @@ pub fn cubic_hermite_shape_functions(xi: f64, length: f64) -> Result<[f64; 4], F
         3.0 * xi.powi(2) - 2.0 * xi.powi(3),
         length * (-xi.powi(2) + xi.powi(3)),
     ])
+}
+
+/// Returns the four bilinear shape functions of a Q4 quadrilateral.
+///
+/// The natural node order is `(-1, -1)`, `(1, -1)`, `(1, 1)`, and `(-1, 1)`.
+#[must_use]
+pub fn quad_q4_shape_functions(xi: f64, eta: f64) -> [f64; 4] {
+    [
+        0.25 * (1.0 - xi) * (1.0 - eta),
+        0.25 * (1.0 + xi) * (1.0 - eta),
+        0.25 * (1.0 + xi) * (1.0 + eta),
+        0.25 * (1.0 - xi) * (1.0 + eta),
+    ]
+}
+
+/// Returns derivatives of the Q4 shape functions with respect to `xi` and `eta`.
+///
+/// The first row contains `dN/dxi`; the second row contains `dN/deta`.
+#[must_use]
+pub fn quad_q4_shape_function_derivatives(xi: f64, eta: f64) -> [[f64; 4]; 2] {
+    [
+        [-0.25 * (1.0 - eta), 0.25 * (1.0 - eta), 0.25 * (1.0 + eta), -0.25 * (1.0 + eta)],
+        [-0.25 * (1.0 - xi), -0.25 * (1.0 + xi), 0.25 * (1.0 + xi), 0.25 * (1.0 - xi)],
+    ]
 }
 
 /// Returns first derivatives with respect to the physical coordinate `x` of
@@ -86,7 +113,8 @@ fn validate_interpolation_length(length: f64) -> Result<(), FemError> {
 mod tests {
     use super::{
         cubic_hermite_first_derivatives, cubic_hermite_second_derivatives, cubic_hermite_shape_functions,
-        linear_lagrange_shape_functions, triangle_t3_shape_functions,
+        linear_lagrange_shape_functions, quad_q4_shape_function_derivatives, quad_q4_shape_functions,
+        triangle_t3_shape_functions,
     };
     use crate::FemError;
     use approx::assert_relative_eq;
@@ -140,6 +168,44 @@ mod tests {
         assert_relative_eq!(functions[0], 0.5, epsilon = 1e-12);
         assert_relative_eq!(functions[1], 0.2, epsilon = 1e-12);
         assert_relative_eq!(functions[2], 0.3, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn quad_q4_functions_have_partition_of_unity() {
+        let functions = quad_q4_shape_functions(0.2, -0.4);
+
+        assert_relative_eq!(functions.iter().sum::<f64>(), 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn quad_q4_functions_reproduce_nodal_values() {
+        let natural_nodes = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+
+        for (node_index, (xi, eta)) in natural_nodes.into_iter().enumerate() {
+            let functions = quad_q4_shape_functions(xi, eta);
+
+            for (function_index, function) in functions.into_iter().enumerate() {
+                let expected = if node_index == function_index { 1.0 } else { 0.0 };
+
+                assert_relative_eq!(function, expected, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn quad_q4_derivatives_match_center_values() {
+        let derivatives = quad_q4_shape_function_derivatives(0.0, 0.0);
+
+        assert_eq!(derivatives[0], [-0.25, 0.25, 0.25, -0.25]);
+        assert_eq!(derivatives[1], [-0.25, -0.25, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn quad_q4_derivatives_sum_to_zero() {
+        let derivatives = quad_q4_shape_function_derivatives(0.2, -0.4);
+
+        assert_relative_eq!(derivatives[0].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(derivatives[1].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
     }
 
     #[test]

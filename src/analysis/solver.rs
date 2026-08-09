@@ -254,7 +254,7 @@ pub fn calculate_sparse_reactions(
 #[cfg(test)]
 mod tests {
     use super::{solve, solve_linear_system, solve_with_settings};
-    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+    use crate::elements::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{
         BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D,
@@ -595,5 +595,78 @@ mod tests {
 
         assert_relative_eq!(x_reaction_sum, -total_self_weight_force, epsilon = 1e-12);
         assert_relative_eq!(y_reaction_sum, 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_quad_with_edge_traction_and_balances_reactions() {
+        let mut model = fully_constrained_quad_model(1.0);
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 8.0, -4.0)
+                .expect("valid load should be created"),
+        );
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let x_reaction_sum = reactions.iter().step_by(2).sum::<f64>();
+        let y_reaction_sum = reactions.iter().skip(1).step_by(2).sum::<f64>();
+
+        assert_relative_eq!(x_reaction_sum, -4.0, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_quad_with_body_force_and_balances_reactions() {
+        let mut model = fully_constrained_quad_model(1.0);
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 8.0, -4.0).expect("valid load should be created"));
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let x_reaction_sum = reactions.iter().step_by(2).sum::<f64>();
+        let y_reaction_sum = reactions.iter().skip(1).step_by(2).sum::<f64>();
+
+        assert_relative_eq!(x_reaction_sum, -8.0, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 4.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn solves_quad_with_self_weight_and_balances_reactions() {
+        let mut model = fully_constrained_quad_model(2.0);
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 5.0, -10.0).expect("valid load should be created"));
+        model.add_element_load(load).expect("load should be added");
+
+        let result = solve(&model).expect("system should be solved");
+        let reactions = result.reactions();
+        let x_reaction_sum = reactions.iter().step_by(2).sum::<f64>();
+        let y_reaction_sum = reactions.iter().skip(1).step_by(2).sum::<f64>();
+
+        assert_relative_eq!(x_reaction_sum, -10.0, epsilon = 1e-12);
+        assert_relative_eq!(y_reaction_sum, 20.0, epsilon = 1e-12);
+    }
+
+    fn fully_constrained_quad_model(density: f64) -> Model2D {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, density).expect("valid material should be created"));
+
+        for (id, x, y) in [(1, 0.0, 0.0), (2, 2.0, 0.0), (3, 2.0, 1.0), (4, 0.0, 1.0)] {
+            model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
+        }
+
+        let quad = QuadQ4::new(10, [1, 2, 3, 4], DEFAULT_MATERIAL_ID, 100).expect("valid quad should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
+
+        model.add_element_with_section(Element2D::QuadQ4(quad), section).expect("element should be added");
+
+        for node_id in 1..=4 {
+            for dof in [Dof2D::Ux, Dof2D::Uy] {
+                model
+                    .add_constraint(DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint"))
+                    .expect("constraint should be added");
+            }
+        }
+
+        model
     }
 }

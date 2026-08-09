@@ -4,9 +4,9 @@ use nalgebra::DVector;
 
 use crate::elements::interpolation::{
     cubic_hermite_first_derivatives, cubic_hermite_shape_functions, linear_lagrange_shape_functions,
-    triangle_t3_shape_functions,
+    quad_q4_shape_functions, triangle_t3_shape_functions,
 };
-use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+use crate::elements::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D};
 use crate::error::FemError;
 use crate::model::{BeamSection2D, DofNumbering2D, ElementLoad2D, Material2D, Model2D, Node2D, TrussSection2D};
 
@@ -18,6 +18,9 @@ pub enum ElementPosition2D {
 
     /// Natural coordinates inside a T3 triangle.
     Triangle { xi: f64, eta: f64 },
+
+    /// Natural coordinates inside a Q4 quadrilateral.
+    Quadrilateral { xi: f64, eta: f64 },
 }
 
 /// Stress and strain results recovered for a 2D truss element.
@@ -484,6 +487,13 @@ pub struct TriangleDisplacement2D {
     uy: f64,
 }
 
+/// Interpolated translational displacement inside a Q4 quadrilateral.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadrilateralDisplacement2D {
+    ux: f64,
+    uy: f64,
+}
+
 /// Displacement result returned by the common interpolation interface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ElementDisplacement2D {
@@ -495,9 +505,26 @@ pub enum ElementDisplacement2D {
 
     /// Interpolated displacement inside a T3 triangle.
     Triangle(TriangleDisplacement2D),
+
+    /// Interpolated displacement inside a Q4 quadrilateral.
+    Quadrilateral(QuadrilateralDisplacement2D),
 }
 
 impl TriangleDisplacement2D {
+    /// Returns the interpolated x-displacement.
+    #[must_use]
+    pub fn ux(&self) -> f64 {
+        self.ux
+    }
+
+    /// Returns the interpolated y-displacement.
+    #[must_use]
+    pub fn uy(&self) -> f64 {
+        self.uy
+    }
+}
+
+impl QuadrilateralDisplacement2D {
     /// Returns the interpolated x-displacement.
     #[must_use]
     pub fn ux(&self) -> f64 {
@@ -540,9 +567,46 @@ pub fn interpolate_triangle_displacement(
     Ok(TriangleDisplacement2D { ux, uy })
 }
 
+/// Interpolates a Q4 displacement at natural coordinates `(xi, eta)`.
+pub fn interpolate_quad_displacement(
+    model: &Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>, xi: f64, eta: f64,
+) -> Result<QuadrilateralDisplacement2D, FemError> {
+    let numbering = DofNumbering2D::from_model(model)?;
+
+    if global_displacements.len() != numbering.count() {
+        return Err(FemError::InvalidDisplacementVector {
+            expected: numbering.count(),
+            actual: global_displacements.len(),
+        });
+    }
+
+    validate_quadrilateral_natural_coordinates(xi, eta)?;
+
+    let element = Element2D::QuadQ4(*quad);
+    let shape_functions = quad_q4_shape_functions(xi, eta);
+    let indices = numbering.element_dof_indices(&element)?;
+    let mut ux = 0.0;
+    let mut uy = 0.0;
+
+    for (node_index, shape_function) in shape_functions.iter().enumerate() {
+        ux += shape_function * global_displacements[indices[2 * node_index]];
+        uy += shape_function * global_displacements[indices[2 * node_index + 1]];
+    }
+
+    Ok(QuadrilateralDisplacement2D { ux, uy })
+}
+
 fn validate_triangle_natural_coordinates(xi: f64, eta: f64) -> Result<(), FemError> {
     if !xi.is_finite() || !eta.is_finite() || xi < 0.0 || eta < 0.0 || xi + eta > 1.0 {
         return Err(FemError::InvalidTriangleNaturalCoordinates { xi, eta });
+    }
+
+    Ok(())
+}
+
+fn validate_quadrilateral_natural_coordinates(xi: f64, eta: f64) -> Result<(), FemError> {
+    if !xi.is_finite() || !eta.is_finite() || !(-1.0..=1.0).contains(&xi) || !(-1.0..=1.0).contains(&eta) {
+        return Err(FemError::InvalidQuadrilateralNaturalCoordinates { xi, eta });
     }
 
     Ok(())
@@ -568,18 +632,25 @@ pub fn interpolate_element_displacement(
 
             Ok(ElementDisplacement2D::Triangle(displacement))
         }
-        (Element2D::Truss(_), ElementPosition2D::Triangle { .. }) => {
+        (Element2D::QuadQ4(quad), ElementPosition2D::Quadrilateral { xi, eta }) => {
+            let displacement = interpolate_quad_displacement(model, quad, global_displacements, xi, eta)?;
+
+            Ok(ElementDisplacement2D::Quadrilateral(displacement))
+        }
+        (Element2D::Truss(_), _) => {
             Err(FemError::InvalidElementInterpolationPosition { element_type: "truss", expected: "a line position" })
         }
-        (Element2D::Beam(_), ElementPosition2D::Triangle { .. }) => {
+        (Element2D::Beam(_), _) => {
             Err(FemError::InvalidElementInterpolationPosition { element_type: "beam", expected: "a line position" })
         }
-        (Element2D::TriangleT3(_), ElementPosition2D::Line { .. }) => {
-            Err(FemError::InvalidElementInterpolationPosition {
-                element_type: "triangle",
-                expected: "triangle natural coordinates",
-            })
-        }
+        (Element2D::TriangleT3(_), _) => Err(FemError::InvalidElementInterpolationPosition {
+            element_type: "triangle",
+            expected: "triangle natural coordinates",
+        }),
+        (Element2D::QuadQ4(_), _) => Err(FemError::InvalidElementInterpolationPosition {
+            element_type: "quad_q4",
+            expected: "quadrilateral natural coordinates",
+        }),
     }
 }
 
@@ -590,7 +661,57 @@ pub struct TriangleResponse2D {
     stress: [f64; 3],
 }
 
+/// Plane-stress results recovered for a Q4 quadrilateral at one natural point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadrilateralResponse2D {
+    xi: f64,
+    eta: f64,
+    strain: [f64; 3],
+    stress: [f64; 3],
+}
+
+/// Q4 recovery locations following common Nastran-style stress output modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuadQ4RecoveryMode2D {
+    /// Recover one response at the element center.
+    Center,
+
+    /// Recover responses at the four `2x2` Gauss integration points.
+    Gauss,
+
+    /// Extrapolate the four Gauss-point responses to the element corners.
+    Corner,
+}
+
 impl TriangleResponse2D {
+    /// Returns `[epsilon_x, epsilon_y, gamma_xy]`.
+    #[must_use]
+    pub fn strain(&self) -> &[f64; 3] {
+        &self.strain
+    }
+
+    /// Returns `[sigma_x, sigma_y, tau_xy]`.
+    #[must_use]
+    pub fn stress(&self) -> &[f64; 3] {
+        &self.stress
+    }
+
+    /// Returns the equivalent von Mises stress for plane stress.
+    #[must_use]
+    pub fn von_mises_stress(&self) -> f64 {
+        let [sigma_x, sigma_y, tau_xy] = self.stress;
+
+        (sigma_x.powi(2) - sigma_x * sigma_y + sigma_y.powi(2) + 3.0 * tau_xy.powi(2)).sqrt()
+    }
+}
+
+impl QuadrilateralResponse2D {
+    /// Returns the natural coordinate where this response was recovered.
+    #[must_use]
+    pub fn natural_coordinates(&self) -> (f64, f64) {
+        (self.xi, self.eta)
+    }
+
     /// Returns `[epsilon_x, epsilon_y, gamma_xy]`.
     #[must_use]
     pub fn strain(&self) -> &[f64; 3] {
@@ -673,6 +794,149 @@ fn calculate_triangle_response(
     Ok(TriangleResponse2D { strain, stress })
 }
 
+/// Recovers the plane-stress response of a Q4 quadrilateral at natural coordinates `(xi, eta)`.
+pub fn recover_quad_response(
+    model: &Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>, xi: f64, eta: f64,
+) -> Result<QuadrilateralResponse2D, FemError> {
+    let (material, nodes, element_displacements) = extract_quad_response_data(model, quad, global_displacements)?;
+
+    validate_quadrilateral_natural_coordinates(xi, eta)?;
+
+    calculate_quad_response(quad, material, nodes, element_displacements, xi, eta)
+}
+
+/// Recovers Q4 plane-stress responses using a Nastran-style output mode.
+pub fn recover_quad_responses(
+    model: &Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>, mode: QuadQ4RecoveryMode2D,
+) -> Result<Vec<QuadrilateralResponse2D>, FemError> {
+    let (material, nodes, element_displacements) = extract_quad_response_data(model, quad, global_displacements)?;
+
+    calculate_quad_responses(quad, material, nodes, element_displacements, mode)
+}
+
+fn extract_quad_response_data<'a>(
+    model: &'a Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>,
+) -> Result<(&'a Material2D, [&'a Node2D; 4], [f64; 8]), FemError> {
+    let material = model.material(quad.material_id())?;
+    model.plane_stress_section(quad.section_id())?;
+    let numbering = DofNumbering2D::from_model(model)?;
+
+    if global_displacements.len() != numbering.count() {
+        return Err(FemError::InvalidDisplacementVector {
+            expected: numbering.count(),
+            actual: global_displacements.len(),
+        });
+    }
+
+    let element = Element2D::QuadQ4(*quad);
+    let node_ids = element.node_ids();
+    let first_node = find_node(model.nodes(), node_ids[0])?;
+    let second_node = find_node(model.nodes(), node_ids[1])?;
+    let third_node = find_node(model.nodes(), node_ids[2])?;
+    let fourth_node = find_node(model.nodes(), node_ids[3])?;
+    let indices = numbering.element_dof_indices(&element)?;
+    let element_displacements = [
+        global_displacements[indices[0]],
+        global_displacements[indices[1]],
+        global_displacements[indices[2]],
+        global_displacements[indices[3]],
+        global_displacements[indices[4]],
+        global_displacements[indices[5]],
+        global_displacements[indices[6]],
+        global_displacements[indices[7]],
+    ];
+
+    Ok((material, [first_node, second_node, third_node, fourth_node], element_displacements))
+}
+
+fn calculate_quad_responses(
+    quad: &QuadQ4, material: &Material2D, nodes: [&Node2D; 4], element_displacements: [f64; 8],
+    mode: QuadQ4RecoveryMode2D,
+) -> Result<Vec<QuadrilateralResponse2D>, FemError> {
+    match mode {
+        QuadQ4RecoveryMode2D::Center => {
+            Ok(vec![calculate_quad_response(quad, material, nodes, element_displacements, 0.0, 0.0)?])
+        }
+        QuadQ4RecoveryMode2D::Gauss => {
+            Ok(calculate_quad_gauss_responses(quad, material, nodes, element_displacements)?.to_vec())
+        }
+        QuadQ4RecoveryMode2D::Corner => {
+            let gauss_responses = calculate_quad_gauss_responses(quad, material, nodes, element_displacements)?;
+
+            Ok(extrapolate_quad_gauss_responses_to_corners(&gauss_responses).to_vec())
+        }
+    }
+}
+
+fn calculate_quad_gauss_responses(
+    quad: &QuadQ4, material: &Material2D, nodes: [&Node2D; 4], element_displacements: [f64; 8],
+) -> Result<[QuadrilateralResponse2D; 4], FemError> {
+    let points = QuadQ4::gauss_points();
+
+    Ok([
+        calculate_quad_response(quad, material, nodes, element_displacements, points[0].0, points[0].1)?,
+        calculate_quad_response(quad, material, nodes, element_displacements, points[1].0, points[1].1)?,
+        calculate_quad_response(quad, material, nodes, element_displacements, points[2].0, points[2].1)?,
+        calculate_quad_response(quad, material, nodes, element_displacements, points[3].0, points[3].1)?,
+    ])
+}
+
+fn extrapolate_quad_gauss_responses_to_corners(
+    gauss_responses: &[QuadrilateralResponse2D; 4],
+) -> [QuadrilateralResponse2D; 4] {
+    [
+        extrapolate_quad_gauss_response_to_point(gauss_responses, -1.0, -1.0),
+        extrapolate_quad_gauss_response_to_point(gauss_responses, 1.0, -1.0),
+        extrapolate_quad_gauss_response_to_point(gauss_responses, 1.0, 1.0),
+        extrapolate_quad_gauss_response_to_point(gauss_responses, -1.0, 1.0),
+    ]
+}
+
+fn extrapolate_quad_gauss_response_to_point(
+    gauss_responses: &[QuadrilateralResponse2D; 4], xi: f64, eta: f64,
+) -> QuadrilateralResponse2D {
+    let gauss_coordinate = 1.0 / 3.0_f64.sqrt();
+    let weights = quad_q4_shape_functions(xi / gauss_coordinate, eta / gauss_coordinate);
+    let mut strain = [0.0; 3];
+    let mut stress = [0.0; 3];
+
+    for (weight, response) in weights.iter().zip(gauss_responses) {
+        for component in 0..3 {
+            strain[component] += weight * response.strain[component];
+            stress[component] += weight * response.stress[component];
+        }
+    }
+
+    QuadrilateralResponse2D { xi, eta, strain, stress }
+}
+
+fn calculate_quad_response(
+    quad: &QuadQ4, material: &Material2D, nodes: [&Node2D; 4], element_displacements: [f64; 8], xi: f64, eta: f64,
+) -> Result<QuadrilateralResponse2D, FemError> {
+    let (strain_displacement_matrix, _) = quad.strain_displacement_matrix(nodes, xi, eta)?;
+    let constitutive_matrix = TriangleT3::constitutive_matrix(material);
+    let mut strain = [0.0; 3];
+    let mut stress = [0.0; 3];
+
+    for (row, strain_value) in strain.iter_mut().enumerate() {
+        *strain_value = strain_displacement_matrix[row]
+            .iter()
+            .zip(element_displacements)
+            .map(|(coefficient, displacement)| coefficient * displacement)
+            .sum();
+    }
+
+    for (row, stress_value) in stress.iter_mut().enumerate() {
+        *stress_value = constitutive_matrix[row]
+            .iter()
+            .zip(strain)
+            .map(|(coefficient, strain_value)| coefficient * strain_value)
+            .sum();
+    }
+
+    Ok(QuadrilateralResponse2D { xi, eta, strain, stress })
+}
+
 /// Postprocessing result for any supported 2D element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ElementResponse2D {
@@ -684,6 +948,9 @@ pub enum ElementResponse2D {
 
     /// Recovered response of a T3 triangle.
     Triangle(TriangleResponse2D),
+
+    /// Recovered response of a Q4 quadrilateral.
+    Quadrilateral(QuadrilateralResponse2D),
 }
 
 /// Recovers the response of one element using its concrete element type.
@@ -706,6 +973,11 @@ pub fn recover_element_response(
 
             Ok(ElementResponse2D::Triangle(response))
         }
+        Element2D::QuadQ4(quad) => {
+            let response = recover_quad_response(model, quad, global_displacements, 0.0, 0.0)?;
+
+            Ok(ElementResponse2D::Quadrilateral(response))
+        }
     }
 }
 
@@ -727,13 +999,15 @@ pub fn recover_model_responses(
 #[cfg(test)]
 mod tests {
     use super::{
-        ElementDisplacement2D, ElementPosition2D, ElementResponse2D, interpolate_beam_displacement,
-        interpolate_element_displacement, interpolate_triangle_displacement, interpolate_truss_displacement,
+        ElementDisplacement2D, ElementPosition2D, ElementResponse2D, QuadQ4RecoveryMode2D, calculate_quad_responses,
+        calculate_triangle_response, find_node, interpolate_beam_displacement, interpolate_element_displacement,
+        interpolate_quad_displacement, interpolate_triangle_displacement, interpolate_truss_displacement,
         recover_beam_response, recover_beam_section_response, recover_element_response, recover_model_responses,
-        recover_triangle_response, recover_truss_response,
+        recover_quad_response, recover_quad_responses, recover_triangle_response, recover_truss_response,
     };
-    use crate::analysis::solver::solve;
-    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+    use crate::analysis::iterative_solver::CgOptions;
+    use crate::analysis::solver::{solve, solve_sparse_with_options};
+    use crate::elements::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{
         BeamSection2D, BeamUniformLineLoad2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, ElementLoad2D,
@@ -777,6 +1051,17 @@ mod tests {
         model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("triangle should be added");
 
         triangle
+    }
+
+    fn add_quad_element(model: &mut Model2D, id: usize, node_ids: [usize; 4], thickness: f64) -> QuadQ4 {
+        let quad = QuadQ4::new(id, node_ids, DEFAULT_MATERIAL_ID, id).expect("valid quad should be created");
+        let section = Section2D::PlaneStress(
+            PlaneStressSection2D::new(thickness).expect("valid plane-stress section should be created"),
+        );
+
+        model.add_element_with_section(Element2D::QuadQ4(quad), section).expect("quad should be added");
+
+        quad
     }
 
     fn horizontal_truss_model() -> Model2D {
@@ -890,6 +1175,23 @@ mod tests {
 
         assert_relative_eq!(triangle_displacement.ux(), 2.3, epsilon = 1e-12);
         assert_relative_eq!(triangle_displacement.uy(), 1.3, epsilon = 1e-12);
+
+        let quad_model = unit_quad_model();
+        let quad = &quad_model.elements()[0];
+        let quad_displacement = interpolate_element_displacement(
+            &quad_model,
+            quad,
+            &DVector::from_row_slice(&[0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 0.0, 2.0]),
+            ElementPosition2D::Quadrilateral { xi: 0.0, eta: 0.0 },
+        )
+        .expect("quad displacement should be interpolated");
+
+        let ElementDisplacement2D::Quadrilateral(quad_displacement) = quad_displacement else {
+            panic!("expected a quadrilateral displacement");
+        };
+
+        assert_relative_eq!(quad_displacement.ux(), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(quad_displacement.uy(), 1.0, epsilon = 1e-12);
     }
 
     #[test]
@@ -922,6 +1224,23 @@ mod tests {
             Err(FemError::InvalidElementInterpolationPosition {
                 element_type: "triangle",
                 expected: "triangle natural coordinates"
+            })
+        ));
+
+        let quad_model = unit_quad_model();
+        let quad = &quad_model.elements()[0];
+        let quad_result = interpolate_element_displacement(
+            &quad_model,
+            quad,
+            &DVector::zeros(8),
+            ElementPosition2D::Triangle { xi: 0.2, eta: 0.3 },
+        );
+
+        assert!(matches!(
+            quad_result,
+            Err(FemError::InvalidElementInterpolationPosition {
+                element_type: "quad_q4",
+                expected: "quadrilateral natural coordinates"
             })
         ));
     }
@@ -1309,6 +1628,20 @@ mod tests {
         model
     }
 
+    fn unit_quad_model() -> Model2D {
+        let mut model = Model2D::new();
+
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        for (id, x, y) in [(1, 0.0, 0.0), (2, 1.0, 0.0), (3, 1.0, 1.0), (4, 0.0, 1.0)] {
+            model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
+        }
+
+        add_quad_element(&mut model, 10, [1, 2, 3, 4], 1.0);
+
+        model
+    }
+
     fn rectangular_t3_tension_model() -> Model2D {
         let mut model = Model2D::new();
         let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
@@ -1400,6 +1733,151 @@ mod tests {
         model
     }
 
+    fn rectangular_cantilever_q4_model(nx: usize, ny: usize) -> Model2D {
+        assert!(nx > 0);
+        assert!(ny > 0);
+
+        let length = 10.0;
+        let height = 1.0;
+        let thickness = 1.0;
+        let young_modulus = 1_000.0;
+        let poisson_ratio = 0.3;
+        let mut model = Model2D::new();
+
+        model.set_material(
+            Material2D::new(young_modulus, poisson_ratio, 1.0).expect("valid material should be created"),
+        );
+
+        for row in 0..=ny {
+            for column in 0..=nx {
+                let node_id = row * (nx + 1) + column + 1;
+                let x = length * column as f64 / nx as f64;
+                let y = height * row as f64 / ny as f64;
+
+                model
+                    .add_node(Node2D::new(node_id, x, y).expect("valid node should be created"))
+                    .expect("node should be added");
+            }
+        }
+
+        for row in 0..ny {
+            for column in 0..nx {
+                let lower_left = row * (nx + 1) + column + 1;
+                let lower_right = lower_left + 1;
+                let upper_left = lower_left + nx + 1;
+                let upper_right = upper_left + 1;
+                let element_id = 100 + row * nx + column;
+
+                add_quad_element(&mut model, element_id, [lower_left, lower_right, upper_right, upper_left], thickness);
+            }
+        }
+
+        for row in 0..=ny {
+            let node_id = row * (nx + 1) + 1;
+
+            for dof in [Dof2D::Ux, Dof2D::Uy] {
+                model
+                    .add_constraint(DisplacementConstraint2D::new(node_id, dof, 0.0).expect("valid constraint"))
+                    .expect("constraint should be added");
+            }
+        }
+
+        let load_per_right_edge_node = -1.0 / (ny + 1) as f64;
+
+        for row in 0..=ny {
+            let node_id = row * (nx + 1) + nx + 1;
+
+            model
+                .add_load(NodalLoad2D::new(node_id, Dof2D::Uy, load_per_right_edge_node).expect("valid load"))
+                .expect("load should be added");
+        }
+
+        model
+    }
+
+    fn cantilever_middle_right_uy(model: &Model2D, displacements: &DVector<f64>, nx: usize, ny: usize) -> f64 {
+        let numbering = crate::model::DofNumbering2D::from_model(model).expect("DOF numbering should be created");
+        let middle_right_node = (ny / 2) * (nx + 1) + nx + 1;
+
+        displacements[numbering.index(middle_right_node, Dof2D::Uy).expect("node should have Uy")]
+    }
+
+    fn max_plane_stress_von_mises(
+        model: &Model2D, displacements: &DVector<f64>, quad_recovery_mode: QuadQ4RecoveryMode2D,
+    ) -> f64 {
+        let numbering = crate::model::DofNumbering2D::from_model(model).expect("DOF numbering should be created");
+        let mut max_von_mises: f64 = 0.0;
+
+        for element in model.elements() {
+            let indices = numbering.element_dof_indices(element).expect("element DOF indices should be created");
+            let node_ids = element.node_ids();
+
+            let von_mises = match element {
+                Element2D::TriangleT3(triangle) => {
+                    let material = model.material(triangle.material_id()).expect("triangle material should exist");
+                    model.plane_stress_section(triangle.section_id()).expect("triangle section should exist");
+                    let first_node = find_node(model.nodes(), node_ids[0]).expect("triangle node should exist");
+                    let second_node = find_node(model.nodes(), node_ids[1]).expect("triangle node should exist");
+                    let third_node = find_node(model.nodes(), node_ids[2]).expect("triangle node should exist");
+                    let element_displacements = [
+                        displacements[indices[0]],
+                        displacements[indices[1]],
+                        displacements[indices[2]],
+                        displacements[indices[3]],
+                        displacements[indices[4]],
+                        displacements[indices[5]],
+                    ];
+                    let response = calculate_triangle_response(
+                        triangle,
+                        material,
+                        first_node,
+                        second_node,
+                        third_node,
+                        element_displacements,
+                    )
+                    .expect("triangle response should be recovered");
+
+                    response.von_mises_stress()
+                }
+                Element2D::QuadQ4(quad) => {
+                    let material = model.material(quad.material_id()).expect("quad material should exist");
+                    model.plane_stress_section(quad.section_id()).expect("quad section should exist");
+                    let first_node = find_node(model.nodes(), node_ids[0]).expect("quad node should exist");
+                    let second_node = find_node(model.nodes(), node_ids[1]).expect("quad node should exist");
+                    let third_node = find_node(model.nodes(), node_ids[2]).expect("quad node should exist");
+                    let fourth_node = find_node(model.nodes(), node_ids[3]).expect("quad node should exist");
+                    let element_displacements = [
+                        displacements[indices[0]],
+                        displacements[indices[1]],
+                        displacements[indices[2]],
+                        displacements[indices[3]],
+                        displacements[indices[4]],
+                        displacements[indices[5]],
+                        displacements[indices[6]],
+                        displacements[indices[7]],
+                    ];
+                    let responses = calculate_quad_responses(
+                        quad,
+                        material,
+                        [first_node, second_node, third_node, fourth_node],
+                        element_displacements,
+                        quad_recovery_mode,
+                    )
+                    .expect("quad responses should be recovered");
+
+                    responses.iter().map(|response| response.von_mises_stress()).fold(0.0, f64::max)
+                }
+                Element2D::Truss(_) | Element2D::Beam(_) => {
+                    panic!("cantilever benchmark should only contain plane-stress elements")
+                }
+            };
+
+            max_von_mises = max_von_mises.max(von_mises);
+        }
+
+        max_von_mises
+    }
+
     #[test]
     fn recovers_uniaxial_plane_stress_for_triangle() {
         let model = right_triangle_model([1, 2, 3]);
@@ -1471,6 +1949,122 @@ mod tests {
     }
 
     #[test]
+    fn interpolates_quad_displacement_and_recovers_uniaxial_plane_stress() {
+        let model = unit_quad_model();
+        let quad = match model.elements()[0] {
+            Element2D::QuadQ4(quad) => quad,
+            _ => panic!("expected a quad element"),
+        };
+        let poisson_ratio = 0.3;
+        let axial_strain = 0.01;
+        let displacements = DVector::from_row_slice(&[
+            0.0,
+            0.0,
+            axial_strain,
+            0.0,
+            axial_strain,
+            -poisson_ratio * axial_strain,
+            0.0,
+            -poisson_ratio * axial_strain,
+        ]);
+
+        let displacement = interpolate_quad_displacement(&model, &quad, &displacements, 0.0, 0.0)
+            .expect("quad displacement should be interpolated");
+
+        assert_relative_eq!(displacement.ux(), axial_strain / 2.0, epsilon = 1e-12);
+        assert_relative_eq!(displacement.uy(), -poisson_ratio * axial_strain / 2.0, epsilon = 1e-12);
+
+        let response =
+            recover_quad_response(&model, &quad, &displacements, 0.0, 0.0).expect("quad response should be recovered");
+
+        assert_eq!(response.natural_coordinates(), (0.0, 0.0));
+        assert_relative_eq!(response.strain()[0], axial_strain, epsilon = 1e-12);
+        assert_relative_eq!(response.strain()[1], -poisson_ratio * axial_strain, epsilon = 1e-12);
+        assert_relative_eq!(response.strain()[2], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+        assert_relative_eq!(response.stress()[1], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(response.stress()[2], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(response.von_mises_stress(), 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn recovers_quad_responses_with_nastran_style_modes() {
+        let model = unit_quad_model();
+        let quad = match model.elements()[0] {
+            Element2D::QuadQ4(quad) => quad,
+            _ => panic!("expected a quad element"),
+        };
+        let poisson_ratio = 0.3;
+        let axial_strain = 0.01;
+        let displacements = DVector::from_row_slice(&[
+            0.0,
+            0.0,
+            axial_strain,
+            0.0,
+            axial_strain,
+            -poisson_ratio * axial_strain,
+            0.0,
+            -poisson_ratio * axial_strain,
+        ]);
+
+        let center_responses = recover_quad_responses(&model, &quad, &displacements, QuadQ4RecoveryMode2D::Center)
+            .expect("center response should be recovered");
+        let gauss_responses = recover_quad_responses(&model, &quad, &displacements, QuadQ4RecoveryMode2D::Gauss)
+            .expect("gauss responses should be recovered");
+        let corner_responses = recover_quad_responses(&model, &quad, &displacements, QuadQ4RecoveryMode2D::Corner)
+            .expect("corner responses should be recovered");
+
+        assert_eq!(center_responses.len(), 1);
+        assert_eq!(gauss_responses.len(), 4);
+        assert_eq!(corner_responses.len(), 4);
+        assert_eq!(center_responses[0].natural_coordinates(), (0.0, 0.0));
+
+        for (response, expected_coordinates) in gauss_responses.iter().zip(QuadQ4::gauss_points()) {
+            assert_relative_eq!(response.natural_coordinates().0, expected_coordinates.0, epsilon = 1e-12);
+            assert_relative_eq!(response.natural_coordinates().1, expected_coordinates.1, epsilon = 1e-12);
+        }
+
+        for (response, expected_coordinates) in
+            corner_responses.iter().zip([(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)])
+        {
+            assert_relative_eq!(response.natural_coordinates().0, expected_coordinates.0, epsilon = 1e-12);
+            assert_relative_eq!(response.natural_coordinates().1, expected_coordinates.1, epsilon = 1e-12);
+        }
+
+        for response in center_responses.iter().chain(&gauss_responses).chain(&corner_responses) {
+            assert_relative_eq!(response.strain()[0], axial_strain, epsilon = 1e-12);
+            assert_relative_eq!(response.strain()[1], -poisson_ratio * axial_strain, epsilon = 1e-12);
+            assert_relative_eq!(response.strain()[2], 0.0, epsilon = 1e-12);
+            assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+            assert_relative_eq!(response.stress()[1], 0.0, epsilon = 1e-12);
+            assert_relative_eq!(response.stress()[2], 0.0, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn quad_corner_recovery_extrapolates_gauss_responses_to_natural_corners() {
+        let model = unit_quad_model();
+        let quad = match model.elements()[0] {
+            Element2D::QuadQ4(quad) => quad,
+            _ => panic!("expected a quad element"),
+        };
+        let displacements = DVector::from_row_slice(&[0.0, 0.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0]);
+        let corner_responses = recover_quad_responses(&model, &quad, &displacements, QuadQ4RecoveryMode2D::Corner)
+            .expect("corner responses should be recovered");
+
+        for response in corner_responses {
+            let (xi, eta) = response.natural_coordinates();
+            let direct_response =
+                recover_quad_response(&model, &quad, &displacements, xi, eta).expect("direct corner response");
+
+            for component in 0..3 {
+                assert_relative_eq!(response.strain()[component], direct_response.strain()[component], epsilon = 1e-12);
+                assert_relative_eq!(response.stress()[component], direct_response.stress()[component], epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn rejects_triangle_interpolation_outside_natural_domain() {
         let model = right_triangle_model([1, 2, 3]);
         let triangle = match model.elements()[0] {
@@ -1484,6 +2078,22 @@ mod tests {
                 interpolate_triangle_displacement(&model, &triangle, &displacements, coordinates.0, coordinates.1);
 
             assert!(matches!(result, Err(FemError::InvalidTriangleNaturalCoordinates { .. })));
+        }
+    }
+
+    #[test]
+    fn rejects_quad_interpolation_outside_natural_domain() {
+        let model = unit_quad_model();
+        let quad = match model.elements()[0] {
+            Element2D::QuadQ4(quad) => quad,
+            _ => panic!("expected a quad element"),
+        };
+        let displacements = DVector::zeros(8);
+
+        for coordinates in [(-1.1, 0.0), (1.1, 0.0), (0.0, -1.1), (0.0, 1.1), (f64::NAN, 0.0), (0.0, f64::INFINITY)] {
+            let result = interpolate_quad_displacement(&model, &quad, &displacements, coordinates.0, coordinates.1);
+
+            assert!(matches!(result, Err(FemError::InvalidQuadrilateralNaturalCoordinates { .. })));
         }
     }
 
@@ -1643,6 +2253,123 @@ mod tests {
     }
 
     #[test]
+    fn t3_and_q4_cantilever_response_comparison_across_meshes() {
+        let length: f64 = 10.0;
+        let height: f64 = 1.0;
+        let thickness: f64 = 1.0;
+        let young_modulus: f64 = 1_000.0;
+        let applied_load: f64 = -1.0;
+        let second_moment_of_area = thickness * height.powi(3) / 12.0;
+        let analytical_tip_deflection = applied_load * length.powi(3) / (3.0 * young_modulus * second_moment_of_area);
+        let analytical_max_von_mises = applied_load.abs() * length * (height / 2.0) / second_moment_of_area;
+        let mut previous_q4_relative_error = f64::INFINITY;
+        let mut previous_t3_von_mises_relative_error = f64::INFINITY;
+        let mut previous_q4_gauss_von_mises_relative_error = f64::INFINITY;
+        let mut previous_q4_corner_von_mises_relative_error = f64::INFINITY;
+        let mut final_t3_relative_error = 0.0;
+        let mut final_q4_relative_error = 0.0;
+        let mut final_t3_von_mises_relative_error = 0.0;
+        let mut final_q4_gauss_von_mises_relative_error = 0.0;
+        let mut final_q4_corner_von_mises_relative_error = 0.0;
+
+        for (nx, ny) in [(4, 2), (8, 4), (16, 8), (32, 16)] {
+            let t3_model = rectangular_cantilever_t3_model(nx, ny);
+            let t3_result = solve(&t3_model).expect("T3 cantilever membrane should be solved");
+            let t3_tip_deflection = cantilever_middle_right_uy(&t3_model, t3_result.displacements(), nx, ny);
+            let t3_relative_error =
+                (t3_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+            let t3_max_von_mises =
+                max_plane_stress_von_mises(&t3_model, t3_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+            let t3_von_mises_relative_error =
+                (t3_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+
+            let q4_model = rectangular_cantilever_q4_model(nx, ny);
+            let q4_result = solve(&q4_model).expect("Q4 cantilever membrane should be solved");
+            let q4_tip_deflection = cantilever_middle_right_uy(&q4_model, q4_result.displacements(), nx, ny);
+            let q4_relative_error =
+                (q4_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+            let q4_gauss_max_von_mises =
+                max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Gauss);
+            let q4_gauss_von_mises_relative_error =
+                (q4_gauss_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+            let q4_corner_max_von_mises =
+                max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+            let q4_corner_von_mises_relative_error =
+                (q4_corner_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+
+            eprintln!(
+                "{nx}x{ny} T3/Q4 comparison: T3 = {t3_tip_deflection:.12} (rel err {t3_relative_error:.6}, max vm {t3_max_von_mises:.12}, vm rel err {t3_von_mises_relative_error:.6}), Q4 = {q4_tip_deflection:.12} (rel err {q4_relative_error:.6}, gauss max vm {q4_gauss_max_von_mises:.12}, gauss vm rel err {q4_gauss_von_mises_relative_error:.6}, corner max vm {q4_corner_max_von_mises:.12}, corner vm rel err {q4_corner_von_mises_relative_error:.6}), analytical = {analytical_tip_deflection:.12}, analytical max vm = {analytical_max_von_mises:.12}"
+            );
+
+            assert!(t3_tip_deflection.is_finite());
+            assert!(q4_tip_deflection.is_finite());
+            assert!(t3_max_von_mises.is_finite());
+            assert!(q4_gauss_max_von_mises.is_finite());
+            assert!(q4_corner_max_von_mises.is_finite());
+            assert!(t3_tip_deflection < 0.0);
+            assert!(q4_tip_deflection < 0.0);
+            assert!(t3_max_von_mises > 0.0);
+            assert!(q4_gauss_max_von_mises > 0.0);
+            assert!(q4_corner_max_von_mises > 0.0);
+            assert!(
+                q4_relative_error < t3_relative_error,
+                "Q4 should be closer to the beam reference than T3 on the same {nx}x{ny} grid: T3 error = {t3_relative_error}, Q4 error = {q4_relative_error}"
+            );
+            assert!(
+                q4_relative_error < previous_q4_relative_error,
+                "Q4 mesh refinement should reduce the error: previous = {previous_q4_relative_error}, current = {q4_relative_error}"
+            );
+            assert!(
+                t3_von_mises_relative_error < previous_t3_von_mises_relative_error,
+                "T3 mesh refinement should reduce the von Mises error: previous = {previous_t3_von_mises_relative_error}, current = {t3_von_mises_relative_error}"
+            );
+            assert!(
+                q4_gauss_von_mises_relative_error < previous_q4_gauss_von_mises_relative_error,
+                "Q4 Gauss recovery mesh refinement should reduce the von Mises error: previous = {previous_q4_gauss_von_mises_relative_error}, current = {q4_gauss_von_mises_relative_error}"
+            );
+            assert!(
+                q4_corner_von_mises_relative_error < previous_q4_corner_von_mises_relative_error,
+                "Q4 corner recovery mesh refinement should reduce the von Mises error: previous = {previous_q4_corner_von_mises_relative_error}, current = {q4_corner_von_mises_relative_error}"
+            );
+            assert!(
+                q4_corner_von_mises_relative_error < t3_von_mises_relative_error,
+                "Q4 corner recovery should be closer to the beam stress reference than T3 on the same {nx}x{ny} grid: T3 error = {t3_von_mises_relative_error}, Q4 error = {q4_corner_von_mises_relative_error}"
+            );
+
+            previous_q4_relative_error = q4_relative_error;
+            previous_t3_von_mises_relative_error = t3_von_mises_relative_error;
+            previous_q4_gauss_von_mises_relative_error = q4_gauss_von_mises_relative_error;
+            previous_q4_corner_von_mises_relative_error = q4_corner_von_mises_relative_error;
+            final_t3_relative_error = t3_relative_error;
+            final_q4_relative_error = q4_relative_error;
+            final_t3_von_mises_relative_error = t3_von_mises_relative_error;
+            final_q4_gauss_von_mises_relative_error = q4_gauss_von_mises_relative_error;
+            final_q4_corner_von_mises_relative_error = q4_corner_von_mises_relative_error;
+        }
+
+        assert!(
+            final_t3_relative_error < 0.11,
+            "the 32x16 T3 mesh should bring the error below 11%: {final_t3_relative_error}"
+        );
+        assert!(
+            final_q4_relative_error < 0.04,
+            "the 32x16 Q4 mesh should bring the error below 4%: {final_q4_relative_error}"
+        );
+        assert!(
+            final_t3_von_mises_relative_error < 0.12,
+            "the 32x16 T3 mesh should bring the max von Mises error below 12%: {final_t3_von_mises_relative_error}"
+        );
+        assert!(
+            final_q4_gauss_von_mises_relative_error < 0.08,
+            "the 32x16 Q4 Gauss recovery should bring the max von Mises error below 8%: {final_q4_gauss_von_mises_relative_error}"
+        );
+        assert!(
+            final_q4_corner_von_mises_relative_error < 0.02,
+            "the 32x16 Q4 corner recovery should bring the max von Mises error below 2%: {final_q4_corner_von_mises_relative_error}"
+        );
+    }
+
+    #[test]
     #[ignore = "large dense benchmark; run explicitly with cargo test -- --ignored"]
     fn t3_cantilever_64x32_dense_mesh_benchmark() {
         let length: f64 = 10.0;
@@ -1668,6 +2395,152 @@ mod tests {
         );
 
         assert!(numerical_tip_deflection < 0.0);
+    }
+
+    #[test]
+    #[ignore = "large dense benchmark; run explicitly with cargo test -- --ignored"]
+    fn t3_and_q4_cantilever_64x32_dense_mesh_comparison() {
+        let length: f64 = 10.0;
+        let height: f64 = 1.0;
+        let thickness: f64 = 1.0;
+        let young_modulus: f64 = 1_000.0;
+        let applied_load: f64 = -1.0;
+        let second_moment_of_area = thickness * height.powi(3) / 12.0;
+        let analytical_tip_deflection = applied_load * length.powi(3) / (3.0 * young_modulus * second_moment_of_area);
+        let analytical_max_von_mises = applied_load.abs() * length * (height / 2.0) / second_moment_of_area;
+        let nx = 64;
+        let ny = 32;
+
+        let t3_model = rectangular_cantilever_t3_model(nx, ny);
+        let t3_result = solve(&t3_model).expect("64x32 T3 cantilever membrane should be solved");
+        let t3_tip_deflection = cantilever_middle_right_uy(&t3_model, t3_result.displacements(), nx, ny);
+        let t3_relative_error = (t3_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+        let t3_max_von_mises =
+            max_plane_stress_von_mises(&t3_model, t3_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+        let t3_von_mises_relative_error =
+            (t3_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+
+        let q4_model = rectangular_cantilever_q4_model(nx, ny);
+        let q4_result = solve(&q4_model).expect("64x32 Q4 cantilever membrane should be solved");
+        let q4_tip_deflection = cantilever_middle_right_uy(&q4_model, q4_result.displacements(), nx, ny);
+        let q4_relative_error = (q4_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+        let q4_gauss_max_von_mises =
+            max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Gauss);
+        let q4_gauss_von_mises_relative_error =
+            (q4_gauss_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+        let q4_corner_max_von_mises =
+            max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+        let q4_corner_von_mises_relative_error =
+            (q4_corner_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+        let relative_t3_q4_difference =
+            (q4_tip_deflection - t3_tip_deflection).abs() / t3_tip_deflection.abs().max(f64::EPSILON);
+
+        eprintln!(
+            "64x32 T3/Q4 comparison: T3 = {t3_tip_deflection:.12} (rel err {t3_relative_error:.6}, max vm {t3_max_von_mises:.12}, vm rel err {t3_von_mises_relative_error:.6}), Q4 = {q4_tip_deflection:.12} (rel err {q4_relative_error:.6}, gauss max vm {q4_gauss_max_von_mises:.12}, gauss vm rel err {q4_gauss_von_mises_relative_error:.6}, corner max vm {q4_corner_max_von_mises:.12}, corner vm rel err {q4_corner_von_mises_relative_error:.6}), analytical = {analytical_tip_deflection:.12}, analytical max vm = {analytical_max_von_mises:.12}, rel diff = {relative_t3_q4_difference:.6}"
+        );
+
+        assert!(t3_tip_deflection.is_finite());
+        assert!(q4_tip_deflection.is_finite());
+        assert!(t3_max_von_mises.is_finite());
+        assert!(q4_gauss_max_von_mises.is_finite());
+        assert!(q4_corner_max_von_mises.is_finite());
+        assert!(t3_tip_deflection < 0.0);
+        assert!(q4_tip_deflection < 0.0);
+        assert!(t3_max_von_mises > 0.0);
+        assert!(q4_gauss_max_von_mises > 0.0);
+        assert!(q4_corner_max_von_mises > 0.0);
+        assert!(
+            relative_t3_q4_difference < 0.25,
+            "Q4 and T3 tip deflections should be comparable for the same 64x32 setup: T3 = {t3_tip_deflection}, Q4 = {q4_tip_deflection}, rel diff = {relative_t3_q4_difference}"
+        );
+        assert!(
+            t3_von_mises_relative_error < 0.02,
+            "the dense 64x32 T3 mesh should bring the max von Mises error below 2%: {t3_von_mises_relative_error}"
+        );
+        assert!(
+            q4_gauss_von_mises_relative_error < 0.01,
+            "the dense 64x32 Q4 Gauss recovery should bring the max von Mises error below 1%: {q4_gauss_von_mises_relative_error}"
+        );
+        assert!(
+            q4_corner_von_mises_relative_error < 0.06,
+            "the dense 64x32 Q4 corner recovery should bring the max von Mises error below 6%: {q4_corner_von_mises_relative_error}"
+        );
+    }
+
+    #[test]
+    #[ignore = "large sparse benchmark; run explicitly with cargo test -- --ignored"]
+    fn t3_and_q4_cantilever_64x32_sparse_response_comparison() {
+        let length: f64 = 10.0;
+        let height: f64 = 1.0;
+        let thickness: f64 = 1.0;
+        let young_modulus: f64 = 1_000.0;
+        let applied_load: f64 = -1.0;
+        let second_moment_of_area = thickness * height.powi(3) / 12.0;
+        let analytical_tip_deflection = applied_load * length.powi(3) / (3.0 * young_modulus * second_moment_of_area);
+        let analytical_max_von_mises = applied_load.abs() * length * (height / 2.0) / second_moment_of_area;
+        let nx = 64;
+        let ny = 32;
+        let sparse_options =
+            CgOptions { max_iterations: 10_000, tolerance: 1e-8, stagnation_window: 0, stagnation_tolerance: 1e-12 };
+
+        let t3_model = rectangular_cantilever_t3_model(nx, ny);
+        let t3_result = solve_sparse_with_options(&t3_model, sparse_options)
+            .expect("64x32 sparse T3 cantilever membrane should be solved");
+        let t3_tip_deflection = cantilever_middle_right_uy(&t3_model, t3_result.displacements(), nx, ny);
+        let t3_relative_error = (t3_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+        let t3_max_von_mises =
+            max_plane_stress_von_mises(&t3_model, t3_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+        let t3_von_mises_relative_error =
+            (t3_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+
+        let q4_model = rectangular_cantilever_q4_model(nx, ny);
+        let q4_result = solve_sparse_with_options(&q4_model, sparse_options)
+            .expect("64x32 sparse Q4 cantilever membrane should be solved");
+        let q4_tip_deflection = cantilever_middle_right_uy(&q4_model, q4_result.displacements(), nx, ny);
+        let q4_relative_error = (q4_tip_deflection - analytical_tip_deflection).abs() / analytical_tip_deflection.abs();
+        let q4_gauss_max_von_mises =
+            max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Gauss);
+        let q4_gauss_von_mises_relative_error =
+            (q4_gauss_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+        let q4_corner_max_von_mises =
+            max_plane_stress_von_mises(&q4_model, q4_result.displacements(), QuadQ4RecoveryMode2D::Corner);
+        let q4_corner_von_mises_relative_error =
+            (q4_corner_max_von_mises - analytical_max_von_mises).abs() / analytical_max_von_mises;
+
+        eprintln!(
+            "64x32 sparse T3/Q4 response comparison: T3 = {t3_tip_deflection:.12} (rel err {t3_relative_error:.6}, max vm {t3_max_von_mises:.12}, vm rel err {t3_von_mises_relative_error:.6}), Q4 = {q4_tip_deflection:.12} (rel err {q4_relative_error:.6}, gauss max vm {q4_gauss_max_von_mises:.12}, gauss vm rel err {q4_gauss_von_mises_relative_error:.6}, corner max vm {q4_corner_max_von_mises:.12}, corner vm rel err {q4_corner_von_mises_relative_error:.6}), analytical = {analytical_tip_deflection:.12}, analytical max vm = {analytical_max_von_mises:.12}"
+        );
+
+        assert!(t3_tip_deflection.is_finite());
+        assert!(q4_tip_deflection.is_finite());
+        assert!(t3_max_von_mises.is_finite());
+        assert!(q4_gauss_max_von_mises.is_finite());
+        assert!(q4_corner_max_von_mises.is_finite());
+        assert!(t3_tip_deflection < 0.0);
+        assert!(q4_tip_deflection < 0.0);
+        assert!(t3_max_von_mises > 0.0);
+        assert!(q4_gauss_max_von_mises > 0.0);
+        assert!(q4_corner_max_von_mises > 0.0);
+        assert!(
+            t3_relative_error < 0.03,
+            "the sparse 64x32 T3 mesh should match the known dense benchmark accuracy: {t3_relative_error}"
+        );
+        assert!(
+            q4_relative_error < 0.01,
+            "the sparse 64x32 Q4 mesh should match the known dense benchmark accuracy: {q4_relative_error}"
+        );
+        assert!(
+            t3_von_mises_relative_error < 0.02,
+            "the sparse 64x32 T3 mesh should bring the max von Mises error below 2%: {t3_von_mises_relative_error}"
+        );
+        assert!(
+            q4_gauss_von_mises_relative_error < 0.01,
+            "the sparse 64x32 Q4 Gauss recovery should bring the max von Mises error below 1%: {q4_gauss_von_mises_relative_error}"
+        );
+        assert!(
+            q4_corner_von_mises_relative_error < 0.06,
+            "the sparse 64x32 Q4 corner recovery should bring the max von Mises error below 6%: {q4_corner_von_mises_relative_error}"
+        );
     }
 
     #[test]
@@ -1715,6 +2588,23 @@ mod tests {
             panic!("expected a triangle response");
         };
 
+        assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn dispatches_quad_response_through_common_interface() {
+        let model = unit_quad_model();
+        let element = &model.elements()[0];
+        let displacements = DVector::from_row_slice(&[0.0, 0.0, 0.01, 0.0, 0.01, -0.003, 0.0, -0.003]);
+
+        let response =
+            recover_element_response(&model, element, &displacements).expect("element response should be recovered");
+
+        let ElementResponse2D::Quadrilateral(response) = response else {
+            panic!("expected a quadrilateral response");
+        };
+
+        assert_eq!(response.natural_coordinates(), (0.0, 0.0));
         assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
     }
 

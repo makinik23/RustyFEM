@@ -1,6 +1,7 @@
 //! Defines 2D elements used in finite element analysis.
 
 use super::Interpolation;
+use super::interpolation::quad_q4_shape_function_derivatives;
 use crate::error::FemError;
 use crate::model::{BeamSection2D, Dof2D, Material2D, Node2D, PlaneStressSection2D, Section2D, TrussSection2D};
 use nalgebra::DMatrix;
@@ -36,12 +37,22 @@ pub struct TriangleT3 {
     section_id: usize,
 }
 
+/// Quadrilateral element in 2D space, defined by four nodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadQ4 {
+    id: usize,
+    node_ids: [usize; 4],
+    material_id: usize,
+    section_id: usize,
+}
+
 /// Enum representing different types of 2D elements used in finite element analysis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Element2D {
     Truss(Truss2D),
     Beam(Beam2D),
     TriangleT3(TriangleT3),
+    QuadQ4(QuadQ4),
 }
 
 impl Truss2D {
@@ -336,9 +347,134 @@ impl TriangleT3 {
     }
 }
 
+impl QuadQ4 {
+    /// Creates a four-node quadrilateral element for a plane-stress analysis.
+    pub fn new(id: usize, node_ids: [usize; 4], material_id: usize, section_id: usize) -> Result<Self, FemError> {
+        for first_index in 0..node_ids.len() {
+            for second_index in (first_index + 1)..node_ids.len() {
+                if node_ids[first_index] == node_ids[second_index] {
+                    return Err(FemError::InvalidElementConnectivity { element_id: id, node_ids: node_ids.to_vec() });
+                }
+            }
+        }
+
+        Ok(Self { id, node_ids, material_id, section_id })
+    }
+
+    /// Returns the material ID used by this element.
+    #[must_use]
+    pub fn material_id(&self) -> usize {
+        self.material_id
+    }
+
+    /// Returns the section ID used by this element.
+    #[must_use]
+    pub fn section_id(&self) -> usize {
+        self.section_id
+    }
+
+    pub(crate) fn gauss_points() -> [(f64, f64); 4] {
+        let point = 1.0 / 3.0_f64.sqrt();
+
+        [(-point, -point), (point, -point), (point, point), (-point, point)]
+    }
+
+    pub(crate) fn strain_displacement_matrix(
+        &self, nodes: [&Node2D; 4], xi: f64, eta: f64,
+    ) -> Result<([[f64; 8]; 3], f64), FemError> {
+        let derivatives = quad_q4_shape_function_derivatives(xi, eta);
+        let dndxi = derivatives[0];
+        let dndeta = derivatives[1];
+        let mut dx_dxi = 0.0;
+        let mut dx_deta = 0.0;
+        let mut dy_dxi = 0.0;
+        let mut dy_deta = 0.0;
+
+        for node_index in 0..4 {
+            dx_dxi += dndxi[node_index] * nodes[node_index].x();
+            dx_deta += dndeta[node_index] * nodes[node_index].x();
+            dy_dxi += dndxi[node_index] * nodes[node_index].y();
+            dy_deta += dndeta[node_index] * nodes[node_index].y();
+        }
+
+        let jacobian_determinant = dx_dxi * dy_deta - dx_deta * dy_dxi;
+
+        if !jacobian_determinant.is_finite() || jacobian_determinant <= 0.0 {
+            return Err(FemError::DegenerateElement {
+                element_id: self.id,
+                element_type: "quad_q4",
+                node_ids: self.node_ids.to_vec(),
+                measure_name: "jacobian determinant",
+                measure: jacobian_determinant,
+            });
+        }
+
+        let mut dndx = [0.0; 4];
+        let mut dndy = [0.0; 4];
+
+        for node_index in 0..4 {
+            dndx[node_index] = (dy_deta * dndxi[node_index] - dy_dxi * dndeta[node_index]) / jacobian_determinant;
+            dndy[node_index] = (-dx_deta * dndxi[node_index] + dx_dxi * dndeta[node_index]) / jacobian_determinant;
+        }
+
+        let mut matrix = [[0.0; 8]; 3];
+
+        for node_index in 0..4 {
+            let x_dof = 2 * node_index;
+            let y_dof = x_dof + 1;
+
+            matrix[0][x_dof] = dndx[node_index];
+            matrix[1][y_dof] = dndy[node_index];
+            matrix[2][x_dof] = dndy[node_index];
+            matrix[2][y_dof] = dndx[node_index];
+        }
+
+        Ok((matrix, jacobian_determinant))
+    }
+
+    /// Calculates the stiffness matrix using a bilinear Q4 plane-stress formulation.
+    pub fn stiffness_matrix(
+        &self, material: &Material2D, section: &PlaneStressSection2D, first_node: &Node2D, second_node: &Node2D,
+        third_node: &Node2D, fourth_node: &Node2D,
+    ) -> Result<[[f64; 8]; 8], FemError> {
+        let nodes = [first_node, second_node, third_node, fourth_node];
+        let constitutive_matrix = TriangleT3::constitutive_matrix(material);
+        let mut stiffness_matrix = [[0.0; 8]; 8];
+
+        for (xi, eta) in Self::gauss_points() {
+            let (strain_displacement_matrix, jacobian_determinant) = self.strain_displacement_matrix(nodes, xi, eta)?;
+            let constitutive_times_strain = multiply_3x3_by_3x8(&constitutive_matrix, &strain_displacement_matrix);
+            let contribution = multiply_transpose_3x8_by_3x8(&strain_displacement_matrix, &constitutive_times_strain);
+            let scale = section.thickness() * jacobian_determinant;
+
+            for row in 0..8 {
+                for column in 0..8 {
+                    stiffness_matrix[row][column] += contribution[row][column] * scale;
+                }
+            }
+        }
+
+        Ok(stiffness_matrix)
+    }
+}
+
 /// Multiplies a 3x3 matrix by a 3x6 matrix.
 fn multiply_3x3_by_3x6(left: &[[f64; 3]; 3], right: &[[f64; 6]; 3]) -> [[f64; 6]; 3] {
     let mut product = [[0.0; 6]; 3];
+
+    for (row, product_row) in product.iter_mut().enumerate() {
+        for (column, product_value) in product_row.iter_mut().enumerate() {
+            *product_value =
+                left[row].iter().enumerate().map(|(index, left_value)| left_value * right[index][column]).sum();
+        }
+    }
+
+    product
+}
+
+/// Multiplies a 3x3 matrix by a 3x8 matrix.
+fn multiply_3x3_by_3x8(left: &[[f64; 3]; 3], right: &[[f64; 8]; 3]) -> [[f64; 8]; 3] {
+    let mut product = [[0.0; 8]; 3];
 
     for (row, product_row) in product.iter_mut().enumerate() {
         for (column, product_value) in product_row.iter_mut().enumerate() {
@@ -364,6 +500,20 @@ fn multiply_transpose_3x6_by_3x6(left: &[[f64; 6]; 3], right: &[[f64; 6]; 3]) ->
     product
 }
 
+/// Multiplies the transpose of a 3x8 matrix by a 3x8 matrix.
+fn multiply_transpose_3x8_by_3x8(left: &[[f64; 8]; 3], right: &[[f64; 8]; 3]) -> [[f64; 8]; 8] {
+    let mut product = [[0.0; 8]; 8];
+
+    for (row, product_row) in product.iter_mut().enumerate() {
+        for (column, product_value) in product_row.iter_mut().enumerate() {
+            *product_value =
+                left.iter().enumerate().map(|(index, left_row)| left_row[row] * right[index][column]).sum();
+        }
+    }
+
+    product
+}
+
 impl Element2D {
     /// Returns the ID of the element.
     pub fn id(&self) -> usize {
@@ -371,6 +521,7 @@ impl Element2D {
             Self::Truss(element) => element.id,
             Self::Beam(element) => element.id,
             Self::TriangleT3(element) => element.id,
+            Self::QuadQ4(element) => element.id,
         }
     }
 
@@ -381,6 +532,7 @@ impl Element2D {
             Self::Truss(_) => "truss",
             Self::Beam(_) => "beam",
             Self::TriangleT3(_) => "triangle_t3",
+            Self::QuadQ4(_) => "quad_q4",
         }
     }
 
@@ -390,6 +542,7 @@ impl Element2D {
             Self::Truss(element) => &element.node_ids,
             Self::Beam(element) => &element.node_ids,
             Self::TriangleT3(element) => &element.node_ids,
+            Self::QuadQ4(element) => &element.node_ids,
         }
     }
 
@@ -400,6 +553,7 @@ impl Element2D {
             Self::Truss(element) => element.section_id(),
             Self::Beam(element) => element.section_id(),
             Self::TriangleT3(element) => element.section_id(),
+            Self::QuadQ4(element) => element.section_id(),
         }
     }
 
@@ -410,6 +564,7 @@ impl Element2D {
             Self::Truss(element) => element.material_id(),
             Self::Beam(element) => element.material_id(),
             Self::TriangleT3(element) => element.material_id(),
+            Self::QuadQ4(element) => element.material_id(),
         }
     }
 
@@ -419,6 +574,7 @@ impl Element2D {
             Self::Truss(_) => Interpolation::LinearLagrange,
             Self::Beam(_) => Interpolation::CubicHermite,
             Self::TriangleT3(_) => Interpolation::LinearTriangleT3,
+            Self::QuadQ4(_) => Interpolation::BilinearQuadQ4,
         }
     }
 
@@ -428,6 +584,7 @@ impl Element2D {
             Self::Truss(_) => TRANSLATIONAL_DOFS,
             Self::Beam(_) => FRAME_DOFS,
             Self::TriangleT3(_) => TRANSLATIONAL_DOFS,
+            Self::QuadQ4(_) => TRANSLATIONAL_DOFS,
         }
     }
 
@@ -476,6 +633,18 @@ impl Element2D {
 
                 Ok(dynamic_matrix_from_array(matrix))
             }
+            (Self::QuadQ4(element), Section2D::PlaneStress(section)) => {
+                let matrix = element.stiffness_matrix(
+                    material,
+                    section,
+                    element_nodes[0],
+                    element_nodes[1],
+                    element_nodes[2],
+                    element_nodes[3],
+                )?;
+
+                Ok(dynamic_matrix_from_array(matrix))
+            }
             _ => Err(FemError::InvalidSectionType {
                 section_id: self.section_id(),
                 expected: self.expected_section_type(),
@@ -489,7 +658,8 @@ impl Element2D {
         match (self, section) {
             (Self::Truss(_), Section2D::Truss(_))
             | (Self::Beam(_), Section2D::Beam(_))
-            | (Self::TriangleT3(_), Section2D::PlaneStress(_)) => Ok(()),
+            | (Self::TriangleT3(_), Section2D::PlaneStress(_))
+            | (Self::QuadQ4(_), Section2D::PlaneStress(_)) => Ok(()),
             _ => Err(FemError::InvalidSectionType {
                 section_id: self.section_id(),
                 expected: self.expected_section_type(),
@@ -505,6 +675,7 @@ impl Element2D {
             Self::Truss(_) => "truss",
             Self::Beam(_) => "beam",
             Self::TriangleT3(_) => "plane_stress",
+            Self::QuadQ4(_) => "plane_stress",
         }
     }
 }
@@ -519,7 +690,7 @@ fn dynamic_matrix_from_array<const N: usize>(matrix: [[f64; N]; N]) -> DMatrix<f
 // TODO cases
 #[cfg(test)]
 mod tests {
-    use super::{Beam2D, Element2D, TriangleT3, Truss2D, dynamic_matrix_from_array};
+    use super::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D, dynamic_matrix_from_array};
     use crate::elements::interpolation::Interpolation;
     use crate::error::FemError;
     use crate::model::{BeamSection2D, Dof2D, Material2D, Node2D, PlaneStressSection2D, Section2D, TrussSection2D};
@@ -537,6 +708,15 @@ mod tests {
                 92,
                 300,
                 vec![3, 4, 5],
+            ),
+            (
+                "quad",
+                QuadQ4::new(40, [4, 5, 6, 7], 93, 400).map(Element2D::QuadQ4),
+                "quad_q4",
+                40,
+                93,
+                400,
+                vec![4, 5, 6, 7],
             ),
         ];
 
@@ -567,6 +747,7 @@ mod tests {
             ("truss", Truss2D::new(10, [1, 1], 0, 100).map(Element2D::Truss), 10, vec![1, 1]),
             ("beam", Beam2D::new(20, [2, 2], 0, 200).map(Element2D::Beam), 20, vec![2, 2]),
             ("triangle", TriangleT3::new(30, [3, 4, 3], 0, 300).map(Element2D::TriangleT3), 30, vec![3, 4, 3]),
+            ("quad", QuadQ4::new(40, [4, 5, 6, 4], 0, 400).map(Element2D::QuadQ4), 40, vec![4, 5, 6, 4]),
         ];
 
         for (name, result, expected_element_id, expected_node_ids) in cases {
@@ -606,6 +787,11 @@ mod tests {
                 ),
                 Interpolation::LinearTriangleT3,
             ),
+            (
+                "quad",
+                Element2D::QuadQ4(QuadQ4::new(40, [4, 5, 6, 7], 0, 400).expect("valid quad should be created")),
+                Interpolation::BilinearQuadQ4,
+            ),
         ];
 
         for (name, element, expected_interpolation) in cases {
@@ -636,6 +822,12 @@ mod tests {
                 vec![Dof2D::Ux, Dof2D::Uy],
                 6,
             ),
+            (
+                "quad",
+                Element2D::QuadQ4(QuadQ4::new(40, [4, 5, 6, 7], 0, 400).expect("valid quad should be created")),
+                vec![Dof2D::Ux, Dof2D::Uy],
+                8,
+            ),
         ];
 
         for (name, element, expected_dofs, expected_count) in cases {
@@ -652,6 +844,7 @@ mod tests {
             Node2D::new(10, 0.0, 0.0).expect("valid node should be created"),
             Node2D::new(20, 1.0, 0.0).expect("valid node should be created"),
             Node2D::new(30, 0.0, 1.0).expect("valid node should be created"),
+            Node2D::new(40, 1.0, 1.0).expect("valid node should be created"),
         ];
         let cases = [
             (
@@ -669,6 +862,11 @@ mod tests {
                 Element2D::TriangleT3(
                     TriangleT3::new(3, [10, 20, 30], 0, 300).expect("valid triangle should be created"),
                 ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
+            ),
+            (
+                "quad",
+                Element2D::QuadQ4(QuadQ4::new(4, [10, 20, 40, 30], 0, 400).expect("valid quad should be created")),
                 Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
             ),
         ];
@@ -689,6 +887,10 @@ mod tests {
                 (Element2D::TriangleT3(triangle), Section2D::PlaneStress(section)) => dynamic_matrix_from_array(
                     triangle
                         .stiffness_matrix(&material, section, &nodes[0], &nodes[1], &nodes[2])
+                        .expect("stiffness matrix should be calculated"),
+                ),
+                (Element2D::QuadQ4(quad), Section2D::PlaneStress(section)) => dynamic_matrix_from_array(
+                    quad.stiffness_matrix(&material, section, &nodes[0], &nodes[1], &nodes[3], &nodes[2])
                         .expect("stiffness matrix should be calculated"),
                 ),
                 _ => unreachable!("test cases should pair compatible elements and sections"),
@@ -759,6 +961,59 @@ mod tests {
         ];
 
         assert_matrix_approximately_equal_6(&matrix, &transposed);
+    }
+
+    #[test]
+    fn quad_q4_stiffness_matrix_is_symmetric_and_balanced() {
+        let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
+        let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
+        let second_node = Node2D::new(2, 2.0, 0.0).expect("valid node should be created");
+        let third_node = Node2D::new(3, 2.0, 1.0).expect("valid node should be created");
+        let fourth_node = Node2D::new(4, 0.0, 1.0).expect("valid node should be created");
+        let quad = QuadQ4::new(40, [1, 2, 3, 4], 0, 400).expect("valid quad should be created");
+        let section = PlaneStressSection2D::new(0.2).expect("valid section should be created");
+
+        let matrix = quad
+            .stiffness_matrix(&material, &section, &first_node, &second_node, &third_node, &fourth_node)
+            .expect("stiffness matrix should be calculated");
+
+        for row in 0..8 {
+            for column in 0..8 {
+                assert!(
+                    (matrix[row][column] - matrix[column][row]).abs() < 1e-10,
+                    "matrix is not symmetric at row {row}, column {column}"
+                );
+            }
+        }
+
+        for (row_index, row) in matrix.iter().enumerate() {
+            let sum = row.iter().sum::<f64>();
+
+            assert!(sum.abs() < 1e-10, "row {row_index} is not balanced: {sum}");
+        }
+    }
+
+    #[test]
+    fn rejects_stiffness_matrix_for_inverted_quad_q4() {
+        let material = Material2D::new(200.0, 0.3, 7800.0).expect("valid material should be created");
+        let first_node = Node2D::new(1, 0.0, 0.0).expect("valid node should be created");
+        let second_node = Node2D::new(2, 0.0, 1.0).expect("valid node should be created");
+        let third_node = Node2D::new(3, 1.0, 1.0).expect("valid node should be created");
+        let fourth_node = Node2D::new(4, 1.0, 0.0).expect("valid node should be created");
+        let quad = QuadQ4::new(40, [1, 2, 3, 4], 0, 400).expect("valid connectivity should be created");
+        let section = PlaneStressSection2D::new(0.2).expect("valid section should be created");
+
+        let result = quad.stiffness_matrix(&material, &section, &first_node, &second_node, &third_node, &fourth_node);
+
+        assert!(matches!(
+            result,
+            Err(FemError::DegenerateElement {
+                element_id: 40,
+                element_type: "quad_q4",
+                measure_name: "jacobian determinant",
+                ..
+            })
+        ));
     }
 
     #[test]

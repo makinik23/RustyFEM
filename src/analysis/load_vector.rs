@@ -1,6 +1,7 @@
 use nalgebra::DVector;
 
-use crate::elements::Element2D;
+use crate::elements::interpolation::quad_q4_shape_functions;
+use crate::elements::{Element2D, QuadQ4};
 use crate::error::FemError;
 use crate::model::{BeamUniformLineLoad2D, BodyForce2D, DofNumbering2D, EdgeTraction2D, Model2D, Node2D, SelfWeight2D};
 
@@ -73,21 +74,21 @@ fn assemble_edge_traction_load(
         .iter()
         .find(|element| element.id() == load.element_id())
         .ok_or(FemError::UnknownId { entity: "element", id: load.element_id() })?;
-    let Element2D::TriangleT3(_) = element else {
+    if !matches!(element, Element2D::TriangleT3(_) | Element2D::QuadQ4(_)) {
         return Err(FemError::InvalidElementLoadType {
             element_id: load.element_id(),
             load_type: EdgeTraction2D::LOAD_TYPE,
-            expected: "triangle_t3",
+            expected: "plane_stress",
             actual: element.element_type(),
         });
-    };
+    }
     let edge_node_ids = load.edge_node_ids();
     let Some(edge_positions) = element_edge_positions(element.node_ids(), edge_node_ids) else {
         return Err(FemError::InvalidElementLoadEdge {
             element_id: load.element_id(),
             load_type: EdgeTraction2D::LOAD_TYPE,
             node_ids: edge_node_ids.to_vec(),
-            expected: "one of the triangle's three edges",
+            expected: "one of the element's boundary edges",
         });
     };
     let section = model.plane_stress_section(element.section_id())?;
@@ -100,7 +101,7 @@ fn assemble_edge_traction_load(
     if !edge_length.is_finite() || edge_length == 0.0 {
         return Err(FemError::DegenerateElement {
             element_id: load.element_id(),
-            element_type: "triangle_t3",
+            element_type: element.element_type(),
             node_ids: element.node_ids().to_vec(),
             measure_name: "edge length",
             measure: edge_length,
@@ -128,7 +129,7 @@ fn assemble_edge_traction_load(
 fn assemble_body_force_load(
     load_vector: &mut DVector<f64>, numbering: &DofNumbering2D, model: &Model2D, load: &BodyForce2D,
 ) -> Result<(), FemError> {
-    assemble_triangle_volume_load(
+    assemble_plane_stress_volume_load(
         load_vector,
         numbering,
         model,
@@ -150,7 +151,7 @@ fn assemble_self_weight_load(
     let material = model.material(element.material_id())?;
     let density = material.density();
 
-    assemble_triangle_volume_load(
+    assemble_plane_stress_volume_load(
         load_vector,
         numbering,
         model,
@@ -161,7 +162,7 @@ fn assemble_self_weight_load(
     )
 }
 
-fn assemble_triangle_volume_load(
+fn assemble_plane_stress_volume_load(
     load_vector: &mut DVector<f64>, numbering: &DofNumbering2D, model: &Model2D, element_id: usize,
     load_type: &'static str, x_force_per_volume: f64, y_force_per_volume: f64,
 ) -> Result<(), FemError> {
@@ -170,29 +171,60 @@ fn assemble_triangle_volume_load(
         .iter()
         .find(|element| element.id() == element_id)
         .ok_or(FemError::UnknownId { entity: "element", id: element_id })?;
-    let Element2D::TriangleT3(triangle) = element else {
-        return Err(FemError::InvalidElementLoadType {
-            element_id,
-            load_type,
-            expected: "triangle_t3",
-            actual: element.element_type(),
-        });
+    let element_load_vector = match element {
+        Element2D::TriangleT3(triangle) => {
+            let node_ids = element.node_ids();
+            let first_node = find_node(model.nodes(), node_ids[0])?;
+            let second_node = find_node(model.nodes(), node_ids[1])?;
+            let third_node = find_node(model.nodes(), node_ids[2])?;
+            let (_, area) = triangle.strain_displacement_matrix(first_node, second_node, third_node)?;
+            let section = model.plane_stress_section(element.section_id())?;
+            let nodal_factor = area * section.thickness() / 3.0;
+
+            vec![
+                x_force_per_volume * nodal_factor,
+                y_force_per_volume * nodal_factor,
+                x_force_per_volume * nodal_factor,
+                y_force_per_volume * nodal_factor,
+                x_force_per_volume * nodal_factor,
+                y_force_per_volume * nodal_factor,
+            ]
+        }
+        Element2D::QuadQ4(quad) => {
+            let node_ids = element.node_ids();
+            let nodes = [
+                find_node(model.nodes(), node_ids[0])?,
+                find_node(model.nodes(), node_ids[1])?,
+                find_node(model.nodes(), node_ids[2])?,
+                find_node(model.nodes(), node_ids[3])?,
+            ];
+            let section = model.plane_stress_section(element.section_id())?;
+            let mut element_load_vector = vec![0.0; element.dof_count()];
+
+            for (xi, eta) in QuadQ4::gauss_points() {
+                let (_, jacobian_determinant) = quad.strain_displacement_matrix(nodes, xi, eta)?;
+                let shape_functions = quad_q4_shape_functions(xi, eta);
+                let scale = section.thickness() * jacobian_determinant;
+
+                for (node_index, shape_function) in shape_functions.iter().enumerate() {
+                    let nodal_factor = shape_function * scale;
+
+                    element_load_vector[2 * node_index] += x_force_per_volume * nodal_factor;
+                    element_load_vector[2 * node_index + 1] += y_force_per_volume * nodal_factor;
+                }
+            }
+
+            element_load_vector
+        }
+        _ => {
+            return Err(FemError::InvalidElementLoadType {
+                element_id,
+                load_type,
+                expected: "plane_stress",
+                actual: element.element_type(),
+            });
+        }
     };
-    let node_ids = element.node_ids();
-    let first_node = find_node(model.nodes(), node_ids[0])?;
-    let second_node = find_node(model.nodes(), node_ids[1])?;
-    let third_node = find_node(model.nodes(), node_ids[2])?;
-    let (_, area) = triangle.strain_displacement_matrix(first_node, second_node, third_node)?;
-    let section = model.plane_stress_section(element.section_id())?;
-    let nodal_factor = area * section.thickness() / 3.0;
-    let element_load_vector = [
-        x_force_per_volume * nodal_factor,
-        y_force_per_volume * nodal_factor,
-        x_force_per_volume * nodal_factor,
-        y_force_per_volume * nodal_factor,
-        x_force_per_volume * nodal_factor,
-        y_force_per_volume * nodal_factor,
-    ];
     let indices = numbering.element_dof_indices(element)?;
 
     for (global_index, value) in indices.iter().zip(element_load_vector) {
@@ -230,7 +262,7 @@ fn find_node(nodes: &[Node2D], node_id: usize) -> Result<&Node2D, FemError> {
 #[cfg(test)]
 mod tests {
     use super::assemble_load_vector;
-    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+    use crate::elements::{Beam2D, Element2D, QuadQ4, TriangleT3, Truss2D};
     use crate::error::FemError;
     use crate::model::{
         BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DEFAULT_MATERIAL_ID, Dof2D, EdgeTraction2D, ElementLoad2D,
@@ -349,6 +381,22 @@ mod tests {
     }
 
     #[test]
+    fn maps_edge_traction_to_quad_edge_nodes() {
+        let mut model = model_with_quad();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 8.0, -4.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("edge traction should be added");
+
+        let actual = assemble_load_vector(&model).expect("load vector should be assembled");
+        let expected = DVector::from_row_slice(&[0.0, 0.0, 2.0, -1.0, 2.0, -1.0, 0.0, 0.0]);
+
+        assert_vector_approximately_equal(&actual, &expected);
+    }
+
+    #[test]
     fn maps_body_force_to_all_triangle_nodes() {
         let mut model = model_with_triangle();
         let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 6.0, -12.0).expect("valid load should be created"));
@@ -362,6 +410,19 @@ mod tests {
     }
 
     #[test]
+    fn maps_body_force_to_all_quad_nodes_with_gauss_integration() {
+        let mut model = model_with_quad();
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 8.0, -4.0).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("body force should be added");
+
+        let actual = assemble_load_vector(&model).expect("load vector should be assembled");
+        let expected = DVector::from_row_slice(&[2.0, -1.0, 2.0, -1.0, 2.0, -1.0, 2.0, -1.0]);
+
+        assert_vector_approximately_equal(&actual, &expected);
+    }
+
+    #[test]
     fn maps_self_weight_to_all_triangle_nodes_using_material_density() {
         let mut model = model_with_triangle_density(2.0);
         let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 6.0, -12.0).expect("valid load should be created"));
@@ -370,6 +431,19 @@ mod tests {
 
         let actual = assemble_load_vector(&model).expect("load vector should be assembled");
         let expected = DVector::from_row_slice(&[2.0, -4.0, 2.0, -4.0, 2.0, -4.0]);
+
+        assert_vector_approximately_equal(&actual, &expected);
+    }
+
+    #[test]
+    fn maps_self_weight_to_all_quad_nodes_using_material_density() {
+        let mut model = model_with_quad_density(2.0);
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 5.0, -10.0).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("self-weight load should be added");
+
+        let actual = assemble_load_vector(&model).expect("load vector should be assembled");
+        let expected = DVector::from_row_slice(&[2.5, -5.0, 2.5, -5.0, 2.5, -5.0, 2.5, -5.0]);
 
         assert_vector_approximately_equal(&actual, &expected);
     }
@@ -431,6 +505,25 @@ mod tests {
             TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
         let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
         model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("triangle should be added");
+
+        model
+    }
+
+    fn model_with_quad() -> Model2D {
+        model_with_quad_density(1.0)
+    }
+
+    fn model_with_quad_density(density: f64) -> Model2D {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, density).expect("valid material should be created"));
+
+        for (id, x, y) in [(1, 0.0, 0.0), (2, 2.0, 0.0), (3, 2.0, 1.0), (4, 0.0, 1.0)] {
+            model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
+        }
+
+        let quad = QuadQ4::new(10, [1, 2, 3, 4], DEFAULT_MATERIAL_ID, 100).expect("valid quad should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::QuadQ4(quad), section).expect("quad should be added");
 
         model
     }
