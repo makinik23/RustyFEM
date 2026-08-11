@@ -14,8 +14,14 @@ pub enum Interpolation {
     /// Linear interpolation over a three-node triangle.
     LinearTriangleT3,
 
+    /// Quadratic interpolation over a six-node triangle.
+    QuadraticTriangleT6,
+
     /// Bilinear interpolation over a four-node quadrilateral.
     BilinearQuadQ4,
+
+    /// Quadratic serendipity interpolation over an eight-node quadrilateral.
+    SerendipityQuadQ8,
 }
 
 /// Returns the two linear Lagrange shape functions evaluated at `xi`.
@@ -66,6 +72,53 @@ pub fn quad_q4_shape_function_derivatives(xi: f64, eta: f64) -> [[f64; 4]; 2] {
     ]
 }
 
+/// Returns the eight serendipity shape functions of a Q8 quadrilateral.
+///
+/// The natural node order is `(-1, -1)`, `(1, -1)`, `(1, 1)`, `(-1, 1)`,
+/// `(0, -1)`, `(1, 0)`, `(0, 1)`, and `(-1, 0)`.
+#[must_use]
+pub fn quad_q8_shape_functions(xi: f64, eta: f64) -> [f64; 8] {
+    [
+        -0.25 * (1.0 - xi) * (1.0 - eta) * (1.0 + xi + eta),
+        -0.25 * (1.0 + xi) * (1.0 - eta) * (1.0 - xi + eta),
+        -0.25 * (1.0 + xi) * (1.0 + eta) * (1.0 - xi - eta),
+        -0.25 * (1.0 - xi) * (1.0 + eta) * (1.0 + xi - eta),
+        0.5 * (1.0 - xi.powi(2)) * (1.0 - eta),
+        0.5 * (1.0 + xi) * (1.0 - eta.powi(2)),
+        0.5 * (1.0 - xi.powi(2)) * (1.0 + eta),
+        0.5 * (1.0 - xi) * (1.0 - eta.powi(2)),
+    ]
+}
+
+/// Returns derivatives of the Q8 shape functions with respect to `xi` and `eta`.
+///
+/// The first row contains `dN/dxi`; the second row contains `dN/deta`.
+#[must_use]
+pub fn quad_q8_shape_function_derivatives(xi: f64, eta: f64) -> [[f64; 8]; 2] {
+    [
+        [
+            0.25 * (1.0 - eta) * (2.0 * xi + eta),
+            0.25 * (1.0 - eta) * (2.0 * xi - eta),
+            0.25 * (1.0 + eta) * (2.0 * xi + eta),
+            0.25 * (1.0 + eta) * (2.0 * xi - eta),
+            -xi * (1.0 - eta),
+            0.5 * (1.0 - eta.powi(2)),
+            -xi * (1.0 + eta),
+            -0.5 * (1.0 - eta.powi(2)),
+        ],
+        [
+            0.25 * (1.0 - xi) * (xi + 2.0 * eta),
+            0.25 * (1.0 + xi) * (2.0 * eta - xi),
+            0.25 * (1.0 + xi) * (xi + 2.0 * eta),
+            0.25 * (1.0 - xi) * (2.0 * eta - xi),
+            -0.5 * (1.0 - xi.powi(2)),
+            -eta * (1.0 + xi),
+            0.5 * (1.0 - xi.powi(2)),
+            -eta * (1.0 - xi),
+        ],
+    ]
+}
+
 /// Returns first derivatives with respect to the physical coordinate `x` of
 /// the four cubic Hermite shape functions.
 pub fn cubic_hermite_first_derivatives(xi: f64, length: f64) -> Result<[f64; 4], FemError> {
@@ -101,6 +154,35 @@ pub fn triangle_t3_shape_functions(xi: f64, eta: f64) -> [f64; 3] {
     [1.0 - xi - eta, xi, eta]
 }
 
+/// Returns the six quadratic shape functions of a T6 triangle.
+///
+/// The natural node order is corner `L1`, corner `L2`, corner `L3`, midside
+/// `L1-L2`, midside `L2-L3`, and midside `L3-L1`, where
+/// `L1 = 1 - xi - eta`, `L2 = xi`, and `L3 = eta`.
+#[must_use]
+pub fn triangle_t6_shape_functions(xi: f64, eta: f64) -> [f64; 6] {
+    let l1 = 1.0 - xi - eta;
+    let l2 = xi;
+    let l3 = eta;
+
+    [l1 * (2.0 * l1 - 1.0), l2 * (2.0 * l2 - 1.0), l3 * (2.0 * l3 - 1.0), 4.0 * l1 * l2, 4.0 * l2 * l3, 4.0 * l3 * l1]
+}
+
+/// Returns derivatives of the T6 shape functions with respect to `xi` and `eta`.
+///
+/// The first row contains `dN/dxi`; the second row contains `dN/deta`.
+#[must_use]
+pub fn triangle_t6_shape_function_derivatives(xi: f64, eta: f64) -> [[f64; 6]; 2] {
+    let l1 = 1.0 - xi - eta;
+    let l2 = xi;
+    let l3 = eta;
+
+    [
+        [1.0 - 4.0 * l1, 4.0 * l2 - 1.0, 0.0, 4.0 * (l1 - l2), 4.0 * l3, -4.0 * l3],
+        [1.0 - 4.0 * l1, 0.0, 4.0 * l3 - 1.0, -4.0 * l2, 4.0 * l2, 4.0 * (l1 - l3)],
+    ]
+}
+
 fn validate_interpolation_length(length: f64) -> Result<(), FemError> {
     if !length.is_finite() || length <= 0.0 {
         return Err(FemError::InvalidInterpolationLength { value: length });
@@ -114,7 +196,8 @@ mod tests {
     use super::{
         cubic_hermite_first_derivatives, cubic_hermite_second_derivatives, cubic_hermite_shape_functions,
         linear_lagrange_shape_functions, quad_q4_shape_function_derivatives, quad_q4_shape_functions,
-        triangle_t3_shape_functions,
+        quad_q8_shape_function_derivatives, quad_q8_shape_functions, triangle_t3_shape_functions,
+        triangle_t6_shape_function_derivatives, triangle_t6_shape_functions,
     };
     use crate::FemError;
     use approx::assert_relative_eq;
@@ -171,6 +254,36 @@ mod tests {
     }
 
     #[test]
+    fn triangle_t6_functions_have_partition_of_unity() {
+        let functions = triangle_t6_shape_functions(0.2, 0.3);
+
+        assert_relative_eq!(functions.iter().sum::<f64>(), 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn triangle_t6_functions_reproduce_nodal_values() {
+        let natural_nodes = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)];
+
+        for (node_index, (xi, eta)) in natural_nodes.into_iter().enumerate() {
+            let functions = triangle_t6_shape_functions(xi, eta);
+
+            for (function_index, function) in functions.into_iter().enumerate() {
+                let expected = if node_index == function_index { 1.0 } else { 0.0 };
+
+                assert_relative_eq!(function, expected, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn triangle_t6_derivatives_sum_to_zero() {
+        let derivatives = triangle_t6_shape_function_derivatives(0.2, 0.3);
+
+        assert_relative_eq!(derivatives[0].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(derivatives[1].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
     fn quad_q4_functions_have_partition_of_unity() {
         let functions = quad_q4_shape_functions(0.2, -0.4);
 
@@ -206,6 +319,65 @@ mod tests {
 
         assert_relative_eq!(derivatives[0].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
         assert_relative_eq!(derivatives[1].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn quad_q8_functions_have_partition_of_unity() {
+        let functions = quad_q8_shape_functions(0.2, -0.4);
+
+        assert_relative_eq!(functions.iter().sum::<f64>(), 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn quad_q8_functions_reproduce_nodal_values() {
+        let natural_nodes =
+            [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)];
+
+        for (node_index, (xi, eta)) in natural_nodes.into_iter().enumerate() {
+            let functions = quad_q8_shape_functions(xi, eta);
+
+            for (function_index, function) in functions.into_iter().enumerate() {
+                let expected = if node_index == function_index { 1.0 } else { 0.0 };
+
+                assert_relative_eq!(function, expected, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn quad_q8_derivatives_match_center_values() {
+        let derivatives = quad_q8_shape_function_derivatives(0.0, 0.0);
+
+        assert_eq!(derivatives[0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, -0.5]);
+        assert_eq!(derivatives[1], [0.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn quad_q8_derivatives_sum_to_zero() {
+        let derivatives = quad_q8_shape_function_derivatives(0.2, -0.4);
+
+        assert_relative_eq!(derivatives[0].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(derivatives[1].iter().sum::<f64>(), 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn quad_q8_derivatives_match_finite_differences() {
+        let xi = 0.17;
+        let eta = -0.31;
+        let step = 1e-6;
+        let derivatives = quad_q8_shape_function_derivatives(xi, eta);
+        let xi_plus = quad_q8_shape_functions(xi + step, eta);
+        let xi_minus = quad_q8_shape_functions(xi - step, eta);
+        let eta_plus = quad_q8_shape_functions(xi, eta + step);
+        let eta_minus = quad_q8_shape_functions(xi, eta - step);
+
+        for index in 0..8 {
+            let finite_difference_xi = (xi_plus[index] - xi_minus[index]) / (2.0 * step);
+            let finite_difference_eta = (eta_plus[index] - eta_minus[index]) / (2.0 * step);
+
+            assert_relative_eq!(derivatives[0][index], finite_difference_xi, epsilon = 1e-9);
+            assert_relative_eq!(derivatives[1][index], finite_difference_eta, epsilon = 1e-9);
+        }
     }
 
     #[test]
