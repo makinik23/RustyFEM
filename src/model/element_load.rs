@@ -101,7 +101,7 @@ impl BeamUniformLineLoad2D {
     }
 }
 
-/// Uniform traction applied along one edge of a plane-stress T3 element.
+/// Uniform traction applied along one edge of a plane-stress element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EdgeTraction2D {
     element_id: usize,
@@ -194,7 +194,7 @@ impl EdgeTraction2D {
     }
 }
 
-/// Uniform body force applied over a plane-stress T3 element.
+/// Uniform body force applied over a plane-stress element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyForce2D {
     element_id: usize,
@@ -250,7 +250,7 @@ impl BodyForce2D {
     }
 }
 
-/// Self-weight load applied over a plane-stress T3 element.
+/// Self-weight load applied over a plane-stress element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelfWeight2D {
     element_id: usize,
@@ -313,13 +313,13 @@ pub enum ElementLoad2D {
     /// Uniform line load along a beam element.
     BeamUniformLine(BeamUniformLineLoad2D),
 
-    /// Uniform traction along one T3 element edge.
+    /// Uniform traction along one plane-stress element edge.
     EdgeTraction(EdgeTraction2D),
 
-    /// Uniform body force over one T3 element.
+    /// Uniform body force over one plane-stress element.
     BodyForce(BodyForce2D),
 
-    /// Self-weight load over one T3 element.
+    /// Self-weight load over one plane-stress element.
     SelfWeight(SelfWeight2D),
 }
 
@@ -351,9 +351,9 @@ impl ElementLoad2D {
     pub fn expected_element_type(&self) -> &'static str {
         match self {
             Self::BeamUniformLine(_) => "beam",
-            Self::EdgeTraction(_) => "triangle_t3",
-            Self::BodyForce(_) => "triangle_t3",
-            Self::SelfWeight(_) => "triangle_t3",
+            Self::EdgeTraction(_) => "plane_stress",
+            Self::BodyForce(_) => "plane_stress",
+            Self::SelfWeight(_) => "plane_stress",
         }
     }
 }
@@ -512,7 +512,7 @@ mod tests {
 
         assert_eq!(load.element_id(), 10);
         assert_eq!(load.load_type(), "edge_traction");
-        assert_eq!(load.expected_element_type(), "triangle_t3");
+        assert_eq!(load.expected_element_type(), "plane_stress");
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod tests {
 
         assert_eq!(load.element_id(), 10);
         assert_eq!(load.load_type(), "body_force");
-        assert_eq!(load.expected_element_type(), "triangle_t3");
+        assert_eq!(load.expected_element_type(), "plane_stress");
     }
 
     #[test]
@@ -604,6 +604,6 @@ mod tests {
 
         assert_eq!(load.element_id(), 10);
         assert_eq!(load.load_type(), "self_weight");
-        assert_eq!(load.expected_element_type(), "triangle_t3");
+        assert_eq!(load.expected_element_type(), "plane_stress");
     }
 }

@@ -9,8 +9,8 @@ behind the implemented formulations.
 - The material is homogeneous, isotropic, and linearly elastic.
 - Young's modulus `E` is finite and strictly positive.
 - Poisson's ratio `nu` must satisfy `-1 < nu < 0.5`.
-- Density is stored and validated, but it is not used by the current static
-  formulation because inertia and body forces are not implemented.
+- Density is stored and validated. It is used by self-weight loads and is not
+  otherwise used by the static stiffness formulation.
 - A `Model2D` currently contains one material shared by all its elements.
 - Plasticity, damage, anisotropy, temperature dependence, and other nonlinear
   constitutive effects are outside the current scope.
@@ -23,19 +23,21 @@ behind the implemented formulations.
 - Geometric nonlinearity, large rotations, contact, buckling, dynamics, and
   time-dependent effects are not implemented.
 - Loads can be applied as nodal loads, uniform line loads on 2D beam elements,
-  uniform edge tractions on T3 plane-stress elements, or uniform body forces
-  and self-weight loads on T3 plane-stress elements.
+  uniform edge tractions on T3/Q4 plane-stress elements, or uniform body
+  forces and self-weight loads on T3/Q4 plane-stress elements.
 - Uniform beam line loads are converted to consistent equivalent nodal loads
   before solving. They can be defined in the beam's local axis system or in the
   model's global x/y axis system.
-- T3 edge tractions are converted to equivalent nodal loads before solving.
-  They can be defined in the global x/y axis system or in an edge-local system
-  whose x-axis runs from the first specified edge node to the second.
-- T3 body forces are converted to equivalent nodal loads before solving. They
-  are defined as force per unit volume in the global x/y axis system.
-- T3 self-weight loads are converted to equivalent nodal loads before solving.
-  They are defined as acceleration in the global x/y axis system and are
-  multiplied by the loaded element material density.
+- Plane-stress edge tractions are converted to equivalent nodal loads before
+  solving. They can be defined in the global x/y axis system or in an
+  edge-local system whose x-axis runs from the first specified edge node to the
+  second.
+- Plane-stress body forces are converted to equivalent nodal loads before
+  solving. They are defined as force per unit volume in the global x/y axis
+  system.
+- Plane-stress self-weight loads are converted to equivalent nodal loads
+  before solving. They are defined as acceleration in the global x/y axis
+  system and are multiplied by the loaded element material density.
 - Boundary conditions are prescribed nodal displacements, including zero
   displacement supports.
 - The global stiffness matrix is assembled in the model's global degrees of
@@ -86,6 +88,30 @@ behind the implemented formulations.
 - Self-weight loads can be applied over the whole T3 element. The total force
   is `density * acceleration * area * thickness` and is distributed equally to
   the three element nodes.
+
+## Plane-Stress Q4 Quadrilateral
+
+- The Q4 element is a four-node bilinear quadrilateral with two translational
+  DOFs per node: `Ux` and `Uy`.
+- The formulation assumes plane stress, so the out-of-plane stress is zero:
+  `sigma_z = 0`.
+- The same bilinear shape functions interpolate geometry and displacement in
+  the natural square `-1 <= xi <= 1`, `-1 <= eta <= 1`.
+- The element stiffness is integrated with a full `2x2` Gauss rule.
+- The Jacobian determinant must be finite and positive at all four Gauss
+  points. This rejects inverted or degenerate node orderings.
+- Strain and stress vary within the element. The common element-response API
+  reports the Q4 response at the element center, `xi = 0`, `eta = 0`.
+- Q4 stress recovery also supports Nastran-style output modes: `Center`,
+  `Gauss` at the four `2x2` integration points, and `Corner`/`BILIN` by
+  bilinear extrapolation from the Gauss points to the natural corners.
+- Thickness is constant and the element has no independent bending DOF.
+- Uniform edge tractions can be applied to any one of the four Q4 edges. The
+  total edge force is `traction * thickness * edge_length` and is distributed
+  equally to the two edge nodes.
+- Uniform body forces and self-weight loads are integrated with the same `2x2`
+  Gauss rule used for stiffness. For rectangular Q4 elements with uniform
+  loading, the total force is distributed equally to the four element nodes.
 
 ## Current Limitations
 

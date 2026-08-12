@@ -84,7 +84,7 @@ impl DofNumbering2D {
 #[cfg(test)]
 mod tests {
     use super::DofNumbering2D;
-    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+    use crate::elements::{Beam2D, Element2D, QuadQ4, QuadQ8, TriangleT3, TriangleT6, Truss2D};
     use crate::model::DisplacementConstraint2D;
     use crate::model::{
         BeamSection2D, DEFAULT_MATERIAL_ID, Dof2D, Material2D, Model2D, Node2D, PlaneStressSection2D, Section2D,
@@ -150,13 +150,48 @@ mod tests {
                 Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
                 vec![0, 1, 2, 3, 4, 5],
             ),
+            (
+                "quad_q4",
+                Element2D::QuadQ4(
+                    QuadQ4::new(4, [10, 20, 40, 30], DEFAULT_MATERIAL_ID, 400).expect("valid quad should be created"),
+                ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
+                vec![0, 1, 2, 3, 4, 5, 6, 7],
+            ),
+            (
+                "quad_q8",
+                Element2D::QuadQ8(
+                    QuadQ8::new(5, [10, 20, 40, 30, 50, 60, 70, 80], DEFAULT_MATERIAL_ID, 500)
+                        .expect("valid quad should be created"),
+                ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            ),
+            (
+                "triangle_t6",
+                Element2D::TriangleT6(
+                    TriangleT6::new(6, [10, 20, 40, 50, 60, 70], DEFAULT_MATERIAL_ID, 600)
+                        .expect("valid triangle should be created"),
+                ),
+                Section2D::PlaneStress(PlaneStressSection2D::new(1.0).expect("valid section")),
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            ),
         ];
 
         for (name, element, section, expected_indices) in cases {
             let mut model = Model2D::new();
             set_test_material(&mut model);
 
-            let nodes = [(10, 0.0, 0.0), (20, 1.0, 0.0), (30, 0.0, 1.0)];
+            let nodes = [
+                (10, 0.0, 0.0),
+                (20, 1.0, 0.0),
+                (40, 1.0, 1.0),
+                (30, 0.0, 1.0),
+                (50, 0.5, 0.0),
+                (60, 1.0, 0.5),
+                (70, 0.5, 1.0),
+                (80, 0.0, 0.5),
+            ];
 
             for (id, x, y) in nodes {
                 let node = Node2D::new(id, x, y).expect("valid node should be created");

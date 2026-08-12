@@ -81,6 +81,11 @@ pub enum FemError {
     )]
     InvalidTriangleNaturalCoordinates { xi: f64, eta: f64 },
 
+    #[error(
+        "quadrilateral natural coordinates are invalid: xi = {xi}, eta = {eta}; expected -1 <= xi <= 1 and -1 <= eta <= 1"
+    )]
+    InvalidQuadrilateralNaturalCoordinates { xi: f64, eta: f64 },
+
     #[error("invalid interpolation position for {element_type}: expected {expected}")]
     InvalidElementInterpolationPosition { element_type: &'static str, expected: &'static str },
 

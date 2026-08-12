@@ -125,11 +125,7 @@ impl Model2D {
         let node_ids = element.node_ids();
         let first_node = self.find_node(node_ids[0])?;
         let second_node = self.find_node(node_ids[1])?;
-        let element_type = match element {
-            Element2D::Truss(_) => "truss",
-            Element2D::Beam(_) => "beam",
-            Element2D::TriangleT3(_) => "triangle_t3",
-        };
+        let element_type = element.element_type();
 
         match element {
             Element2D::Truss(_) | Element2D::Beam(_) => {
@@ -165,6 +161,53 @@ impl Model2D {
                     });
                 }
             }
+            Element2D::TriangleT6(triangle) => {
+                let third_node = self.find_node(node_ids[2])?;
+                let fourth_node = self.find_node(node_ids[3])?;
+                let fifth_node = self.find_node(node_ids[4])?;
+                let sixth_node = self.find_node(node_ids[5])?;
+
+                for (xi, eta, _) in crate::elements::TriangleT6::gauss_points() {
+                    triangle.strain_displacement_matrix(
+                        [first_node, second_node, third_node, fourth_node, fifth_node, sixth_node],
+                        xi,
+                        eta,
+                    )?;
+                }
+            }
+            Element2D::QuadQ4(quad) => {
+                let third_node = self.find_node(node_ids[2])?;
+                let fourth_node = self.find_node(node_ids[3])?;
+
+                for (xi, eta) in crate::elements::QuadQ4::gauss_points() {
+                    quad.strain_displacement_matrix([first_node, second_node, third_node, fourth_node], xi, eta)?;
+                }
+            }
+            Element2D::QuadQ8(quad) => {
+                let third_node = self.find_node(node_ids[2])?;
+                let fourth_node = self.find_node(node_ids[3])?;
+                let fifth_node = self.find_node(node_ids[4])?;
+                let sixth_node = self.find_node(node_ids[5])?;
+                let seventh_node = self.find_node(node_ids[6])?;
+                let eighth_node = self.find_node(node_ids[7])?;
+
+                for (xi, eta, _) in crate::elements::QuadQ8::gauss_points() {
+                    quad.strain_displacement_matrix(
+                        [
+                            first_node,
+                            second_node,
+                            third_node,
+                            fourth_node,
+                            fifth_node,
+                            sixth_node,
+                            seventh_node,
+                            eighth_node,
+                        ],
+                        xi,
+                        eta,
+                    )?;
+                }
+            }
         }
 
         Ok(())
@@ -192,7 +235,7 @@ impl Model2D {
     }
 
     fn validate_element_load(load: &ElementLoad2D, element: &Element2D) -> Result<(), FemError> {
-        if element.element_type() != load.expected_element_type() {
+        if !element_accepts_load(load, element) {
             return Err(FemError::InvalidElementLoadType {
                 element_id: load.element_id(),
                 load_type: load.load_type(),
@@ -204,12 +247,12 @@ impl Model2D {
         match load {
             ElementLoad2D::BeamUniformLine(_) => Ok(()),
             ElementLoad2D::EdgeTraction(load) => {
-                if !is_element_edge(element.node_ids(), load.edge_node_ids()) {
+                if !is_element_edge(element, load.edge_node_ids()) {
                     return Err(FemError::InvalidElementLoadEdge {
                         element_id: load.element_id(),
                         load_type: EdgeTraction2D::LOAD_TYPE,
                         node_ids: load.edge_node_ids().to_vec(),
-                        expected: "one of the triangle's three edges",
+                        expected: "one of the element's boundary edges",
                     });
                 }
 
@@ -305,7 +348,27 @@ impl Model2D {
     }
 }
 
-fn is_element_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> bool {
+fn element_accepts_load(load: &ElementLoad2D, element: &Element2D) -> bool {
+    match load {
+        ElementLoad2D::BeamUniformLine(_) => matches!(element, Element2D::Beam(_)),
+        ElementLoad2D::EdgeTraction(_) | ElementLoad2D::BodyForce(_) | ElementLoad2D::SelfWeight(_) => {
+            matches!(
+                element,
+                Element2D::TriangleT3(_) | Element2D::TriangleT6(_) | Element2D::QuadQ4(_) | Element2D::QuadQ8(_)
+            )
+        }
+    }
+}
+
+fn is_element_edge(element: &Element2D, edge_node_ids: [usize; 2]) -> bool {
+    match element {
+        Element2D::TriangleT6(_) => is_triangle_t6_edge(element.node_ids(), edge_node_ids),
+        Element2D::QuadQ8(_) => is_quad_q8_edge(element.node_ids(), edge_node_ids),
+        _ => is_linear_element_edge(element.node_ids(), edge_node_ids),
+    }
+}
+
+fn is_linear_element_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> bool {
     element_node_ids
         .iter()
         .copied()
@@ -317,11 +380,31 @@ fn is_element_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> boo
         })
 }
 
+fn is_triangle_t6_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> bool {
+    [([0, 1], 3), ([1, 2], 4), ([2, 0], 5)].iter().any(|&([first_corner, second_corner], _)| {
+        let first = element_node_ids[first_corner];
+        let second = element_node_ids[second_corner];
+
+        (edge_node_ids[0] == first && edge_node_ids[1] == second)
+            || (edge_node_ids[0] == second && edge_node_ids[1] == first)
+    })
+}
+
+fn is_quad_q8_edge(element_node_ids: &[usize], edge_node_ids: [usize; 2]) -> bool {
+    [([0, 1], 4), ([1, 2], 5), ([2, 3], 6), ([3, 0], 7)].iter().any(|&([first_corner, second_corner], _)| {
+        let first = element_node_ids[first_corner];
+        let second = element_node_ids[second_corner];
+
+        (edge_node_ids[0] == first && edge_node_ids[1] == second)
+            || (edge_node_ids[0] == second && edge_node_ids[1] == first)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::Model2D;
     use crate::FemError;
-    use crate::elements::{Beam2D, Element2D, TriangleT3, Truss2D};
+    use crate::elements::{Beam2D, Element2D, QuadQ4, QuadQ8, TriangleT3, Truss2D};
     use crate::model::{
         BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D,
         EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, Material2D, NodalLoad2D, Node2D, PlaneStressSection2D,
@@ -552,7 +635,7 @@ mod tests {
                 element_id: 10,
                 load_type: "edge_traction",
                 node_ids,
-                expected: "one of the triangle's three edges",
+                expected: "one of the element's boundary edges",
             }) if node_ids == vec![1, 4]
         ));
         assert!(model.element_loads().is_empty());
@@ -581,9 +664,79 @@ mod tests {
             Err(FemError::InvalidElementLoadType {
                 element_id: 10,
                 load_type: "edge_traction",
-                expected: "triangle_t3",
+                expected: "plane_stress",
                 actual: "beam",
             })
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_edge_traction_for_quad_edge() {
+        let mut model = quad_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("edge traction should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn adds_edge_traction_for_quad_q8_corner_edge() {
+        let mut model = quad_q8_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [2, 3], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        model.add_element_load(load).expect("edge traction should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn rejects_edge_traction_for_non_edge_quad_node_pair() {
+        let mut model = quad_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [1, 3], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadEdge {
+                element_id: 10,
+                load_type: "edge_traction",
+                node_ids,
+                expected: "one of the element's boundary edges",
+            }) if node_ids == vec![1, 3]
+        ));
+        assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn rejects_edge_traction_for_non_edge_quad_q8_node_pair() {
+        let mut model = quad_q8_model();
+        let load = ElementLoad2D::EdgeTraction(
+            EdgeTraction2D::new(10, [1, 3], LoadCoordinateSystem2D::Global, 0.0, -5.0)
+                .expect("valid load should be created"),
+        );
+
+        let result = model.add_element_load(load);
+
+        assert!(matches!(
+            result,
+            Err(FemError::InvalidElementLoadEdge {
+                element_id: 10,
+                load_type: "edge_traction",
+                node_ids,
+                expected: "one of the element's boundary edges",
+            }) if node_ids == vec![1, 3]
         ));
         assert!(model.element_loads().is_empty());
     }
@@ -618,11 +771,31 @@ mod tests {
             Err(FemError::InvalidElementLoadType {
                 element_id: 10,
                 load_type: "body_force",
-                expected: "triangle_t3",
+                expected: "plane_stress",
                 actual: "beam",
             })
         ));
         assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_body_force_for_quad() {
+        let mut model = quad_model();
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 0.0, -5.0).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("body force should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn adds_body_force_for_quad_q8() {
+        let mut model = quad_q8_model();
+        let load = ElementLoad2D::BodyForce(BodyForce2D::new(10, 0.0, -5.0).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("body force should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
     }
 
     #[test]
@@ -655,11 +828,31 @@ mod tests {
             Err(FemError::InvalidElementLoadType {
                 element_id: 10,
                 load_type: "self_weight",
-                expected: "triangle_t3",
+                expected: "plane_stress",
                 actual: "beam",
             })
         ));
         assert!(model.element_loads().is_empty());
+    }
+
+    #[test]
+    fn adds_self_weight_for_quad() {
+        let mut model = quad_model();
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 0.0, -9.81).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("self-weight load should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
+    }
+
+    #[test]
+    fn adds_self_weight_for_quad_q8() {
+        let mut model = quad_q8_model();
+        let load = ElementLoad2D::SelfWeight(SelfWeight2D::new(10, 0.0, -9.81).expect("valid load should be created"));
+
+        model.add_element_load(load).expect("self-weight load should be added");
+
+        assert_eq!(model.element_loads(), &[load]);
     }
 
     #[test]
@@ -727,7 +920,7 @@ mod tests {
     fn rejects_degenerate_elements() {
         let mut model = Model2D::new();
 
-        for node_id in 1..=3 {
+        for node_id in 1..=4 {
             let node = Node2D::new(node_id, 1.0, 1.0).expect("valid node should be created");
 
             model.add_node(node).expect("node should be added");
@@ -757,6 +950,14 @@ mod tests {
                         .expect("valid triangle connectivity should be created"),
                 ),
                 "area",
+            ),
+            (
+                "quad_q4",
+                Element2D::QuadQ4(
+                    QuadQ4::new(40, [1, 2, 3, 4], DEFAULT_MATERIAL_ID, 400)
+                        .expect("valid quad connectivity should be created"),
+                ),
+                "jacobian determinant",
             ),
         ];
 
@@ -809,6 +1010,46 @@ mod tests {
             TriangleT3::new(10, [1, 2, 3], DEFAULT_MATERIAL_ID, 100).expect("valid triangle should be created");
         let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
         model.add_element_with_section(Element2D::TriangleT3(triangle), section).expect("triangle should be added");
+
+        model
+    }
+
+    fn quad_model() -> Model2D {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        for (id, x, y) in [(1, 0.0, 0.0), (2, 2.0, 0.0), (3, 2.0, 1.0), (4, 0.0, 1.0)] {
+            model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
+        }
+
+        let quad = QuadQ4::new(10, [1, 2, 3, 4], DEFAULT_MATERIAL_ID, 100).expect("valid quad should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::QuadQ4(quad), section).expect("quad should be added");
+
+        model
+    }
+
+    fn quad_q8_model() -> Model2D {
+        let mut model = Model2D::new();
+        model.set_material(Material2D::new(200.0, 0.3, 1.0).expect("valid material should be created"));
+
+        for (id, x, y) in [
+            (1, 0.0, 0.0),
+            (2, 2.0, 0.0),
+            (3, 2.0, 1.0),
+            (4, 0.0, 1.0),
+            (5, 1.0, 0.0),
+            (6, 2.0, 0.5),
+            (7, 1.0, 1.0),
+            (8, 0.0, 0.5),
+        ] {
+            model.add_node(Node2D::new(id, x, y).expect("valid node should be created")).expect("node should be added");
+        }
+
+        let quad =
+            QuadQ8::new(10, [1, 2, 3, 4, 5, 6, 7, 8], DEFAULT_MATERIAL_ID, 100).expect("valid quad should be created");
+        let section = Section2D::PlaneStress(PlaneStressSection2D::new(0.5).expect("valid section should be created"));
+        model.add_element_with_section(Element2D::QuadQ8(quad), section).expect("quad should be added");
 
         model
     }
