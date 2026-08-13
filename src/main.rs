@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 use rusty_fem::FemError;
@@ -6,6 +8,7 @@ use rusty_fem::analysis::iterative_solver::CgTerminationReason;
 use rusty_fem::analysis::solver::{AnalysisResult2D, solve_with_settings};
 use rusty_fem::analysis::{ElementResponse2D, recover_beam_section_response, recover_model_responses};
 use rusty_fem::elements::{Beam2D, Element2D, QuadQ4, QuadQ8, TriangleT3, TriangleT6, Truss2D};
+use rusty_fem::io::{AnalysisResult2DOutput, Model2DInput};
 use rusty_fem::model::{
     AnalysisSpace, BeamSection2D, BeamUniformLineLoad2D, BodyForce2D, DisplacementConstraint2D, Dof2D, DofNumbering2D,
     EdgeTraction2D, ElementLoad2D, LoadCoordinateSystem2D, Material2D, Model2D, NodalLoad2D, Node2D,
@@ -18,17 +21,25 @@ struct Cli {
     #[arg(long, value_name = "2D|3D")]
     space: Option<AnalysisSpace>,
 
+    /// Reads a 2D model from a JSON file instead of prompting interactively.
+    #[arg(long, value_name = "PATH")]
+    input: Option<PathBuf>,
+
+    /// Writes the solved 2D result to a JSON file.
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+
     /// Selects the linear solver used for the analysis.
-    #[arg(long, value_enum, default_value_t = SolverKind::Dense)]
-    solver: SolverKind,
+    #[arg(long, value_enum)]
+    solver: Option<SolverKind>,
 
     /// Relative residual tolerance used by the sparse iterative solver.
-    #[arg(long, default_value_t = 1e-10, value_name = "TOLERANCE")]
-    cg_tolerance: f64,
+    #[arg(long, value_name = "TOLERANCE")]
+    cg_tolerance: Option<f64>,
 
     /// Maximum number of CG iterations used by the sparse solver.
-    #[arg(long, default_value_t = 1_000, value_name = "ITERATIONS")]
-    cg_max_iterations: usize,
+    #[arg(long, value_name = "ITERATIONS")]
+    cg_max_iterations: Option<usize>,
 }
 
 /// Selects between the reference dense solver and the sparse iterative solver.
@@ -53,11 +64,12 @@ impl From<SolverKind> for SolverKind2D {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    println!("RustyFEM interactive session");
+    println!("RustyFEM");
 
-    let space = match cli.space {
-        Some(space) => space,
-        None => read_analysis_space()?,
+    let space = match (cli.space, cli.input.as_ref()) {
+        (Some(space), _) => space,
+        (None, Some(_)) => AnalysisSpace::TwoDimensional,
+        (None, None) => read_analysis_space()?,
     };
 
     println!("Selected analysis space: {:?}", space);
@@ -69,10 +81,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let mut model = match cli.input.as_ref() {
+        Some(path) => read_model_from_json(path)?,
+        None => read_model_interactively()?,
+    };
+
+    apply_cli_analysis_settings(&cli, &mut model)?;
+    print_model_summary(&model);
+
+    println!();
+    let result = solve_with_settings(&model);
+
+    match result {
+        Ok(result) => {
+            print_analysis_results(&model, &result)?;
+
+            if let Some(path) = cli.output.as_ref() {
+                write_analysis_result_json(path, &model, &result)?;
+            }
+        }
+        Err(error) => println!("Could not solve model: {error}"),
+    }
+
+    Ok(())
+}
+
+fn read_model_from_json(path: &Path) -> Result<Model2D, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let input: Model2DInput = serde_json::from_str(&contents)?;
+    let model = input.into_model()?;
+
+    println!("Loaded model from {}.", path.display());
+
+    Ok(model)
+}
+
+fn read_model_interactively() -> Result<Model2D, Box<dyn std::error::Error>> {
+    println!("Interactive session");
+
     let mut model = Model2D::new();
-    model.analysis_settings_mut().set_solver(cli.solver.into());
-    model.analysis_settings_mut().set_cg_tolerance(cli.cg_tolerance)?;
-    model.analysis_settings_mut().set_cg_max_iterations(cli.cg_max_iterations)?;
 
     read_materials(&mut model)?;
     read_sections(&mut model)?;
@@ -81,6 +128,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     read_elements(&mut model)?;
     read_loads(&mut model)?;
 
+    Ok(model)
+}
+
+fn apply_cli_analysis_settings(cli: &Cli, model: &mut Model2D) -> Result<(), FemError> {
+    if let Some(solver) = cli.solver {
+        model.analysis_settings_mut().set_solver(solver.into());
+    }
+
+    if let Some(tolerance) = cli.cg_tolerance {
+        model.analysis_settings_mut().set_cg_tolerance(tolerance)?;
+    }
+
+    if let Some(max_iterations) = cli.cg_max_iterations {
+        model.analysis_settings_mut().set_cg_max_iterations(max_iterations)?;
+    }
+
+    Ok(())
+}
+
+fn print_model_summary(model: &Model2D) {
     println!();
     println!("Model summary:");
     println!("  materials: {}", model.materials().materials().len());
@@ -94,14 +161,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model.loads().len(),
         model.element_loads().len()
     );
+}
 
-    println!();
-    let result = solve_with_settings(&model);
-
-    match result {
-        Ok(result) => print_analysis_results(&model, &result)?,
-        Err(error) => println!("Could not solve model: {error}"),
+fn write_analysis_result_json(
+    path: &Path, model: &Model2D, result: &AnalysisResult2D,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
     }
+
+    let output = AnalysisResult2DOutput::from_model_and_result(model, result)?;
+    let contents = serde_json::to_string_pretty(&output)?;
+
+    fs::write(path, format!("{contents}\n"))?;
+    println!("Wrote result JSON to {}.", path.display());
 
     Ok(())
 }

@@ -52,6 +52,56 @@ tractions on plane-stress elements, body forces on plane-stress elements, or
 self-weight on plane-stress elements.
 Enter `done` at the end of each group.
 
+## Run From JSON
+
+Models can also be loaded from a JSON file. This bypasses the interactive
+prompts and uses the same validated `Model2D` insertion path internally:
+
+```bash
+cargo run -- --input examples/truss_2d.json \
+  --output target/io_examples/truss_result.json
+```
+
+The solver can still be overridden from the command line:
+
+```bash
+cargo run -- --input examples/truss_2d.json \
+  --solver sparse \
+  --cg-tolerance 1e-12 \
+  --cg-max-iterations 1000 \
+  --output target/io_examples/truss_sparse_result.json
+```
+
+The input file contains analysis settings, materials, sections, nodes,
+elements, constraints, and loads. The output JSON contains nodal
+displacements, reactions, optional sparse-solver diagnostics, and recovered
+element responses.
+
+A small T3 plane-stress cantilever example is also available:
+
+```bash
+cargo run -- --input examples/t3_cantilever.json \
+  --output target/io_examples/t3_cantilever_result.json
+```
+
+Larger `64x32` T3 and Q4 cantilever JSON examples are available for checking
+the sparse solver and comparing plane-stress elements on the same node grid:
+
+```bash
+cargo run --release -- --input examples/t3_cantilever_64x32.json \
+  --output target/io_examples/t3_cantilever_64x32_result.json
+
+cargo run --release -- --input examples/q4_cantilever_64x32.json \
+  --output target/io_examples/q4_cantilever_64x32_result.json
+```
+
+The corresponding integration test is ignored by default because it solves two
+large models:
+
+```bash
+cargo test --release t3_and_q4_64x32_json_files_solve_with_sparse -- --ignored --nocapture
+```
+
 ## Beam Example
 
 The following example is a cantilever beam with:
