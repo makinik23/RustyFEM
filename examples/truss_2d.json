@@ -1,0 +1,65 @@
+{
+  "analysis_settings": {
+    "solver": "dense"
+  },
+  "materials": [
+    {
+      "id": 1,
+      "young_modulus": 200.0,
+      "poisson_ratio": 0.3,
+      "density": 1.0
+    }
+  ],
+  "sections": [
+    {
+      "id": 1,
+      "type": "truss",
+      "area": 1.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "id": 2,
+      "x": 1.0,
+      "y": 0.0
+    }
+  ],
+  "elements": [
+    {
+      "type": "truss",
+      "id": 1,
+      "nodes": [1, 2],
+      "material": 1,
+      "section": 1
+    }
+  ],
+  "constraints": [
+    {
+      "node": 1,
+      "dof": "ux",
+      "value": 0.0
+    },
+    {
+      "node": 1,
+      "dof": "uy",
+      "value": 0.0
+    },
+    {
+      "node": 2,
+      "dof": "uy",
+      "value": 0.0
+    }
+  ],
+  "nodal_loads": [
+    {
+      "node": 2,
+      "dof": "ux",
+      "value": 10.0
+    }
+  ]
+}

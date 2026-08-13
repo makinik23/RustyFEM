@@ -1,0 +1,335 @@
+{
+  "analysis_settings": {
+    "solver": "sparse",
+    "cg_tolerance": 1e-08,
+    "cg_max_iterations": 10000,
+    "cg_stagnation_window": 0,
+    "cg_stagnation_tolerance": 1e-12
+  },
+  "materials": [
+    {
+      "id": 1,
+      "young_modulus": 1000.0,
+      "poisson_ratio": 0.3,
+      "density": 1.0
+    }
+  ],
+  "sections": [
+    {
+      "id": 1,
+      "type": "plane_stress",
+      "thickness": 1.0
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "id": 2,
+      "x": 2.5,
+      "y": 0.0
+    },
+    {
+      "id": 3,
+      "x": 5.0,
+      "y": 0.0
+    },
+    {
+      "id": 4,
+      "x": 7.5,
+      "y": 0.0
+    },
+    {
+      "id": 5,
+      "x": 10.0,
+      "y": 0.0
+    },
+    {
+      "id": 6,
+      "x": 0.0,
+      "y": 0.5
+    },
+    {
+      "id": 7,
+      "x": 2.5,
+      "y": 0.5
+    },
+    {
+      "id": 8,
+      "x": 5.0,
+      "y": 0.5
+    },
+    {
+      "id": 9,
+      "x": 7.5,
+      "y": 0.5
+    },
+    {
+      "id": 10,
+      "x": 10.0,
+      "y": 0.5
+    },
+    {
+      "id": 11,
+      "x": 0.0,
+      "y": 1.0
+    },
+    {
+      "id": 12,
+      "x": 2.5,
+      "y": 1.0
+    },
+    {
+      "id": 13,
+      "x": 5.0,
+      "y": 1.0
+    },
+    {
+      "id": 14,
+      "x": 7.5,
+      "y": 1.0
+    },
+    {
+      "id": 15,
+      "x": 10.0,
+      "y": 1.0
+    }
+  ],
+  "elements": [
+    {
+      "type": "t3",
+      "id": 100,
+      "nodes": [
+        1,
+        2,
+        7
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 101,
+      "nodes": [
+        1,
+        7,
+        6
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 102,
+      "nodes": [
+        2,
+        3,
+        8
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 103,
+      "nodes": [
+        2,
+        8,
+        7
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 104,
+      "nodes": [
+        3,
+        4,
+        9
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 105,
+      "nodes": [
+        3,
+        9,
+        8
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 106,
+      "nodes": [
+        4,
+        5,
+        10
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 107,
+      "nodes": [
+        4,
+        10,
+        9
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 108,
+      "nodes": [
+        6,
+        7,
+        12
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 109,
+      "nodes": [
+        6,
+        12,
+        11
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 110,
+      "nodes": [
+        7,
+        8,
+        13
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 111,
+      "nodes": [
+        7,
+        13,
+        12
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 112,
+      "nodes": [
+        8,
+        9,
+        14
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 113,
+      "nodes": [
+        8,
+        14,
+        13
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 114,
+      "nodes": [
+        9,
+        10,
+        15
+      ],
+      "material": 1,
+      "section": 1
+    },
+    {
+      "type": "t3",
+      "id": 115,
+      "nodes": [
+        9,
+        15,
+        14
+      ],
+      "material": 1,
+      "section": 1
+    }
+  ],
+  "constraints": [
+    {
+      "node": 1,
+      "dof": "ux",
+      "value": 0.0
+    },
+    {
+      "node": 1,
+      "dof": "uy",
+      "value": 0.0
+    },
+    {
+      "node": 6,
+      "dof": "ux",
+      "value": 0.0
+    },
+    {
+      "node": 6,
+      "dof": "uy",
+      "value": 0.0
+    },
+    {
+      "node": 11,
+      "dof": "ux",
+      "value": 0.0
+    },
+    {
+      "node": 11,
+      "dof": "uy",
+      "value": 0.0
+    }
+  ],
+  "loads": [
+    {
+      "type": "edge_traction",
+      "element": 106,
+      "edge": [
+        5,
+        10
+      ],
+      "coordinate_system": "global",
+      "tx": 0.0,
+      "ty": -1.0
+    },
+    {
+      "type": "edge_traction",
+      "element": 114,
+      "edge": [
+        10,
+        15
+      ],
+      "coordinate_system": "global",
+      "tx": 0.0,
+      "ty": -1.0
+    }
+  ]
+}
