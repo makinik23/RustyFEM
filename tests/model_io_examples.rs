@@ -1,4 +1,7 @@
+use nalgebra::DVector;
+use rusty_fem::analysis::recover_model_responses_with_progress;
 use rusty_fem::analysis::solver::solve_with_settings;
+use rusty_fem::elements::Element2D;
 use rusty_fem::io::{AnalysisResult2DOutput, Model2DInput};
 use rusty_fem::model::{Dof2D, DofNumbering2D, SolverKind2D};
 
@@ -32,6 +35,69 @@ fn t3_cantilever_json_example_solves_to_expected_tip_displacement() {
     assert_eq!(output.displacements.len(), 30);
     assert_eq!(output.reactions.len(), 30);
     assert_eq!(output.element_responses.len(), 16);
+}
+
+#[test]
+fn plate_stress_concentration_t3_json_example_loads_for_viewer() {
+    let input: Model2DInput = serde_json::from_str(include_str!("../examples/plate_stress_concentration_t3.json"))
+        .expect("plate benchmark example JSON should parse");
+    let model = input.into_model().expect("plate benchmark model should be built");
+
+    assert_eq!(model.analysis_settings().solver(), SolverKind2D::Sparse);
+    assert_eq!(model.nodes().len(), 1664);
+    assert_eq!(model.elements().len(), 3072);
+    assert_eq!(model.constraints().len(), 3);
+    assert_eq!(model.element_loads().len(), 42);
+    assert!(model.loads().is_empty());
+}
+
+#[test]
+fn plate_stress_concentration_t6_json_example_loads_for_viewer() {
+    let input: Model2DInput = serde_json::from_str(include_str!("../examples/plate_stress_concentration_t6.json"))
+        .expect("T6 plate benchmark example JSON should parse");
+    let model = input.into_model().expect("T6 plate benchmark model should be built");
+
+    assert_eq!(model.analysis_settings().solver(), SolverKind2D::Sparse);
+    assert_eq!(model.nodes().len(), 6400);
+    assert_eq!(model.elements().len(), 3072);
+    assert!(model.elements().iter().all(|element| matches!(element, Element2D::TriangleT6(_))));
+    assert_eq!(model.constraints().len(), 3);
+    assert_eq!(model.element_loads().len(), 42);
+    assert!(model.loads().is_empty());
+}
+
+#[test]
+fn alternative_t6_plate_json_meshes_load_for_viewer() {
+    for (contents, expected_nodes, expected_elements) in [
+        (include_str!("../examples/plate_stress_concentration_t6_improved_mesh.json"), 5_184, 2_496),
+        (include_str!("../examples/plate_stress_concentration_t6_dense.json"), 9_000, 4_392),
+    ] {
+        let input: Model2DInput = serde_json::from_str(contents).expect("alternative T6 JSON should parse");
+        let model = input.into_model().expect("alternative T6 model should build");
+
+        assert_eq!(model.analysis_settings().solver(), SolverKind2D::Sparse);
+        assert_eq!(model.nodes().len(), expected_nodes);
+        assert_eq!(model.elements().len(), expected_elements);
+        assert!(model.elements().iter().all(|element| matches!(element, Element2D::TriangleT6(_))));
+    }
+}
+
+#[test]
+fn plate_stress_concentration_t3_recovers_all_elements_with_progress() {
+    let input: Model2DInput = serde_json::from_str(include_str!("../examples/plate_stress_concentration_t3.json"))
+        .expect("plate benchmark example JSON should parse");
+    let model = input.into_model().expect("plate benchmark model should be built");
+    let numbering = DofNumbering2D::from_model(&model).expect("DOF numbering should be created");
+    let mut last_progress = None;
+
+    let responses =
+        recover_model_responses_with_progress(&model, &DVector::zeros(numbering.count()), |completed, total| {
+            last_progress = Some((completed, total))
+        })
+        .expect("all plate element responses should be recovered");
+
+    assert_eq!(responses.len(), 3072);
+    assert_eq!(last_progress, Some((3072, 3072)));
 }
 
 #[test]

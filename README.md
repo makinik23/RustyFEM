@@ -102,6 +102,27 @@ large models:
 cargo test --release t3_and_q4_64x32_json_files_solve_with_sparse -- --ignored --nocapture
 ```
 
+## Native GUI Preprocessor
+
+The native GUI can inspect, edit, save, solve, and postprocess a 2D model
+without going through terminal prompts. It is a separate workspace package
+that depends on the public `rusty-fem` library API:
+
+```bash
+cargo run -p rusty-fem-gui -- examples/t3_cantilever.json
+```
+
+`Draw FEM` supports direct, grid-snapped element placement with automatic node
+and element numbering. Corner clicks create or reuse nodes; T6 and Q8 midside
+nodes are generated and shared automatically. The editor also supports node
+movement, supports, nodal loads, and plane-stress edge tractions. The document
+has native Open/Save As dialogs and Undo/Redo. Dense or sparse analysis can be
+run in the GUI, with deformed-mesh and full in-plane stress and strain contour
+views. T6 contours interpolate the nodally averaged response inside each
+quadratic element. Sparse solves run in the background with live CG residual
+and convergence progress. See [the GUI preprocessor notes](docs/gui-model-inspector.md)
+for controls, limitations, and module layout.
+
 ## Beam Example
 
 The following example is a cantilever beam with:
@@ -413,6 +434,31 @@ alpha_k = sigma_y(root) / sigma_nom
 sigma_nom = P / ((b - 2a) t)
 ```
 
+The same T3 benchmark geometry is available as a JSON model for the native
+viewer:
+
+```bash
+cargo run -p rusty-fem-gui -- examples/plate_stress_concentration_t3.json
+```
+
+The same geometric mesh is also available with quadratic T6 triangles:
+
+```bash
+cargo run -p rusty-fem-gui -- examples/plate_stress_concentration_t6.json
+```
+
+Regenerate that JSON example from the benchmark mesh generator with:
+
+```bash
+cargo bench --bench plate_stress_concentration -- --t3-json
+```
+
+Regenerate the T6 JSON example with:
+
+```bash
+cargo bench --bench plate_stress_concentration -- --t6-json
+```
+
 Generate only the T3 mesh SVG with:
 
 ```bash
@@ -430,6 +476,30 @@ Run the sparse T3/T6 von Mises comparison with:
 ```bash
 cargo bench --bench plate_stress_concentration -- --t3-t6
 ```
+
+Compare nodally averaged T6 results from the reference, improved, and dense
+JSON meshes with:
+
+```bash
+cargo bench --bench plate_stress_concentration -- --t6-json-convergence
+```
+
+The command prints notch-root `sigma_y`, concentration factors, maximum von
+Mises stress, sparse-solver convergence diagnostics, and elapsed time for every
+mesh.
+
+Current nodally averaged results are:
+
+| T6 mesh | Elements | Nodes | A/R25 `sigma_y` [MPa] | A/R25 error | B/R50 `sigma_y` [MPa] | B/R50 error | Max von Mises [MPa] | Relative residual |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reference | `3072` | `6400` | `44.163057` | `+2.82%` | `34.716246` | `-1.15%` | `44.485211` | `9.862e-9` |
+| Improved | `2496` | `5184` | `44.359340` | `+3.28%` | `34.757592` | `-1.03%` | `44.513061` | `9.993e-9` |
+| Dense | `4392` | `9000` | `44.477483` | `+3.56%` | `34.786052` | `-0.95%` | `44.511265` | `9.806e-9` |
+
+The maximum von Mises value is already stable to about `0.06%` across these
+meshes. Refinement moves the smoother `B/R50` root toward the strain-gauge
+value, while the sharper `A/R25` root converges slightly above it; experimental
+agreement is therefore not expected to improve monotonically with mesh size.
 
 The SVG outputs and point-sampling CSV are collected in
 `target/plate_stress_concentration/`.

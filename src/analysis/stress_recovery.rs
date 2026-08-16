@@ -1,6 +1,7 @@
 //! Postprocessing of solved FEM results.
 
 use nalgebra::DVector;
+use std::collections::HashMap;
 
 use crate::elements::interpolation::{
     cubic_hermite_first_derivatives, cubic_hermite_shape_functions, linear_lagrange_shape_functions,
@@ -108,16 +109,16 @@ impl TrussResponse2D {
 pub fn recover_truss_response(
     model: &Model2D, truss: &Truss2D, global_displacements: &DVector<f64>,
 ) -> Result<TrussResponse2D, FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    recover_truss_response_with_numbering(model, truss, global_displacements, &numbering)
+}
+
+fn recover_truss_response_with_numbering(
+    model: &Model2D, truss: &Truss2D, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<TrussResponse2D, FemError> {
     let material = model.material(truss.material_id())?;
     let section = model.truss_section(truss.section_id())?;
-    let numbering = DofNumbering2D::from_model(model)?;
-
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
 
     let element = Element2D::Truss(*truss);
     let node_ids = element.node_ids();
@@ -137,6 +138,19 @@ pub fn recover_truss_response(
 
 fn find_node(nodes: &[Node2D], node_id: usize) -> Result<&Node2D, FemError> {
     nodes.iter().find(|node| node.id() == node_id).ok_or(FemError::UnknownId { entity: "node", id: node_id })
+}
+
+fn validated_dof_numbering(model: &Model2D, global_displacements: &DVector<f64>) -> Result<DofNumbering2D, FemError> {
+    let numbering = DofNumbering2D::from_model(model)?;
+
+    if global_displacements.len() != numbering.count() {
+        return Err(FemError::InvalidDisplacementVector {
+            expected: numbering.count(),
+            actual: global_displacements.len(),
+        });
+    }
+
+    Ok(numbering)
 }
 
 fn calculate_truss_response(
@@ -227,10 +241,18 @@ impl BeamResponse2D {
 pub fn recover_beam_response(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>,
 ) -> Result<BeamResponse2D, FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    recover_beam_response_with_numbering(model, beam, global_displacements, &numbering)
+}
+
+fn recover_beam_response_with_numbering(
+    model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<BeamResponse2D, FemError> {
     let material = model.material(beam.material_id())?;
     let section = model.beam_section(beam.section_id())?;
     let (local_displacements, length, cosine, sine) =
-        extract_beam_local_displacements(model, beam, global_displacements)?;
+        extract_beam_local_displacements_with_numbering(model, beam, global_displacements, numbering)?;
     let mut response = calculate_beam_end_forces(beam, material, section, length, local_displacements);
     let equivalent_loads = beam_equivalent_local_element_loads(model, beam, length, cosine, sine);
 
@@ -244,15 +266,14 @@ pub fn recover_beam_response(
 fn extract_beam_local_displacements(
     model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>,
 ) -> Result<([f64; 6], f64, f64, f64), FemError> {
-    let numbering = DofNumbering2D::from_model(model)?;
+    let numbering = validated_dof_numbering(model, global_displacements)?;
 
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
+    extract_beam_local_displacements_with_numbering(model, beam, global_displacements, &numbering)
+}
 
+fn extract_beam_local_displacements_with_numbering(
+    model: &Model2D, beam: &Beam2D, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<([f64; 6], f64, f64, f64), FemError> {
     let element = Element2D::Beam(*beam);
     let node_ids = element.node_ids();
     let first_node = find_node(model.nodes(), node_ids[0])?;
@@ -744,6 +765,20 @@ pub struct QuadrilateralResponse2D {
     stress: [f64; 3],
 }
 
+/// Plane-stress response averaged at one mesh node.
+///
+/// Each adjacent plane-stress element contributes one local nodal response.
+/// The stored components are their arithmetic average, following the common
+/// nodal averaging used by engineering postprocessors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodalPlaneStressResponse2D {
+    node_id: usize,
+    strain: [f64; 3],
+    stress: [f64; 3],
+    equivalent_strain: f64,
+    contributing_elements: usize,
+}
+
 /// Q4 recovery locations following common Nastran-style stress output modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuadQ4RecoveryMode2D {
@@ -807,20 +842,60 @@ impl QuadrilateralResponse2D {
     }
 }
 
+impl NodalPlaneStressResponse2D {
+    /// Returns the node ID associated with this response.
+    #[must_use]
+    pub fn node_id(&self) -> usize {
+        self.node_id
+    }
+
+    /// Returns `[epsilon_x, epsilon_y, gamma_xy]`.
+    #[must_use]
+    pub fn strain(&self) -> &[f64; 3] {
+        &self.strain
+    }
+
+    /// Returns `[sigma_x, sigma_y, tau_xy]`.
+    #[must_use]
+    pub fn stress(&self) -> &[f64; 3] {
+        &self.stress
+    }
+
+    /// Returns the averaged elastic equivalent strain `sigma_vm / E`.
+    #[must_use]
+    pub fn equivalent_strain(&self) -> f64 {
+        self.equivalent_strain
+    }
+
+    /// Returns the von Mises stress calculated from the averaged components.
+    #[must_use]
+    pub fn von_mises_stress(&self) -> f64 {
+        let [sigma_x, sigma_y, tau_xy] = self.stress;
+
+        (sigma_x.powi(2) - sigma_x * sigma_y + sigma_y.powi(2) + 3.0 * tau_xy.powi(2)).sqrt()
+    }
+
+    /// Returns how many adjacent elements contributed to the average.
+    #[must_use]
+    pub fn contributing_elements(&self) -> usize {
+        self.contributing_elements
+    }
+}
+
 /// Recovers the constant plane-stress response of a T3 triangle.
 pub fn recover_triangle_response(
     model: &Model2D, triangle: &TriangleT3, global_displacements: &DVector<f64>,
 ) -> Result<TriangleResponse2D, FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    recover_triangle_response_with_numbering(model, triangle, global_displacements, &numbering)
+}
+
+fn recover_triangle_response_with_numbering(
+    model: &Model2D, triangle: &TriangleT3, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<TriangleResponse2D, FemError> {
     let material = model.material(triangle.material_id())?;
     model.plane_stress_section(triangle.section_id())?;
-    let numbering = DofNumbering2D::from_model(model)?;
-
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
 
     let element = Element2D::TriangleT3(*triangle);
     let node_ids = element.node_ids();
@@ -895,19 +970,86 @@ pub fn recover_triangle_t6_gauss_responses(
     Ok(responses)
 }
 
+/// Recovers T6 plane-stress responses at its three corner and three midside nodes.
+pub fn recover_triangle_t6_nodal_responses(
+    model: &Model2D, triangle: &TriangleT6, global_displacements: &DVector<f64>,
+) -> Result<[TriangleResponse2D; 6], FemError> {
+    let (material, nodes, element_displacements) =
+        extract_triangle_t6_response_data(model, triangle, global_displacements)?;
+
+    calculate_triangle_t6_nodal_responses(triangle, material, nodes, element_displacements)
+}
+
+fn calculate_triangle_t6_nodal_responses(
+    triangle: &TriangleT6, material: &Material2D, nodes: [&Node2D; 6], element_displacements: [f64; 12],
+) -> Result<[TriangleResponse2D; 6], FemError> {
+    const NATURAL_NODES: [(f64, f64); 6] = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)];
+
+    Ok([
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[0].0,
+            NATURAL_NODES[0].1,
+        )?,
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[1].0,
+            NATURAL_NODES[1].1,
+        )?,
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[2].0,
+            NATURAL_NODES[2].1,
+        )?,
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[3].0,
+            NATURAL_NODES[3].1,
+        )?,
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[4].0,
+            NATURAL_NODES[4].1,
+        )?,
+        calculate_triangle_t6_response(
+            triangle,
+            material,
+            nodes,
+            element_displacements,
+            NATURAL_NODES[5].0,
+            NATURAL_NODES[5].1,
+        )?,
+    ])
+}
+
 fn extract_triangle_t6_response_data<'a>(
     model: &'a Model2D, triangle: &TriangleT6, global_displacements: &DVector<f64>,
 ) -> Result<(&'a Material2D, [&'a Node2D; 6], [f64; 12]), FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    extract_triangle_t6_response_data_with_numbering(model, triangle, global_displacements, &numbering)
+}
+
+fn extract_triangle_t6_response_data_with_numbering<'a>(
+    model: &'a Model2D, triangle: &TriangleT6, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<(&'a Material2D, [&'a Node2D; 6], [f64; 12]), FemError> {
     let material = model.material(triangle.material_id())?;
     model.plane_stress_section(triangle.section_id())?;
-    let numbering = DofNumbering2D::from_model(model)?;
-
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
 
     let element = Element2D::TriangleT6(*triangle);
     let node_ids = element.node_ids();
@@ -989,16 +1131,16 @@ pub fn recover_quad_responses(
 fn extract_quad_response_data<'a>(
     model: &'a Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>,
 ) -> Result<(&'a Material2D, [&'a Node2D; 4], [f64; 8]), FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    extract_quad_response_data_with_numbering(model, quad, global_displacements, &numbering)
+}
+
+fn extract_quad_response_data_with_numbering<'a>(
+    model: &'a Model2D, quad: &QuadQ4, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<(&'a Material2D, [&'a Node2D; 4], [f64; 8]), FemError> {
     let material = model.material(quad.material_id())?;
     model.plane_stress_section(quad.section_id())?;
-    let numbering = DofNumbering2D::from_model(model)?;
-
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
 
     let element = Element2D::QuadQ4(*quad);
     let node_ids = element.node_ids();
@@ -1123,16 +1265,16 @@ pub fn recover_quad_q8_response(
 fn extract_quad_q8_response_data<'a>(
     model: &'a Model2D, quad: &QuadQ8, global_displacements: &DVector<f64>,
 ) -> Result<(&'a Material2D, [&'a Node2D; 8], [f64; 16]), FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    extract_quad_q8_response_data_with_numbering(model, quad, global_displacements, &numbering)
+}
+
+fn extract_quad_q8_response_data_with_numbering<'a>(
+    model: &'a Model2D, quad: &QuadQ8, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<(&'a Material2D, [&'a Node2D; 8], [f64; 16]), FemError> {
     let material = model.material(quad.material_id())?;
     model.plane_stress_section(quad.section_id())?;
-    let numbering = DofNumbering2D::from_model(model)?;
-
-    if global_displacements.len() != numbering.count() {
-        return Err(FemError::InvalidDisplacementVector {
-            expected: numbering.count(),
-            actual: global_displacements.len(),
-        });
-    }
 
     let element = Element2D::QuadQ8(*quad);
     let node_ids = element.node_ids();
@@ -1216,34 +1358,49 @@ pub enum ElementResponse2D {
 pub fn recover_element_response(
     model: &Model2D, element: &Element2D, global_displacements: &DVector<f64>,
 ) -> Result<ElementResponse2D, FemError> {
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+
+    recover_element_response_with_numbering(model, element, global_displacements, &numbering)
+}
+
+fn recover_element_response_with_numbering(
+    model: &Model2D, element: &Element2D, global_displacements: &DVector<f64>, numbering: &DofNumbering2D,
+) -> Result<ElementResponse2D, FemError> {
     match element {
         Element2D::Truss(truss) => {
-            let response = recover_truss_response(model, truss, global_displacements)?;
+            let response = recover_truss_response_with_numbering(model, truss, global_displacements, numbering)?;
 
             Ok(ElementResponse2D::Truss(response))
         }
         Element2D::Beam(beam) => {
-            let response = recover_beam_response(model, beam, global_displacements)?;
+            let response = recover_beam_response_with_numbering(model, beam, global_displacements, numbering)?;
 
             Ok(ElementResponse2D::Beam(response))
         }
         Element2D::TriangleT3(triangle) => {
-            let response = recover_triangle_response(model, triangle, global_displacements)?;
+            let response = recover_triangle_response_with_numbering(model, triangle, global_displacements, numbering)?;
 
             Ok(ElementResponse2D::Triangle(response))
         }
         Element2D::TriangleT6(triangle) => {
-            let response = recover_triangle_t6_response(model, triangle, global_displacements, 1.0 / 3.0, 1.0 / 3.0)?;
+            let (material, nodes, element_displacements) =
+                extract_triangle_t6_response_data_with_numbering(model, triangle, global_displacements, numbering)?;
+            let response =
+                calculate_triangle_t6_response(triangle, material, nodes, element_displacements, 1.0 / 3.0, 1.0 / 3.0)?;
 
             Ok(ElementResponse2D::Triangle(response))
         }
         Element2D::QuadQ4(quad) => {
-            let response = recover_quad_response(model, quad, global_displacements, 0.0, 0.0)?;
+            let (material, nodes, element_displacements) =
+                extract_quad_response_data_with_numbering(model, quad, global_displacements, numbering)?;
+            let response = calculate_quad_response(quad, material, nodes, element_displacements, 0.0, 0.0)?;
 
             Ok(ElementResponse2D::Quadrilateral(response))
         }
         Element2D::QuadQ8(quad) => {
-            let response = recover_quad_q8_response(model, quad, global_displacements, 0.0, 0.0)?;
+            let (material, nodes, element_displacements) =
+                extract_quad_q8_response_data_with_numbering(model, quad, global_displacements, numbering)?;
+            let response = calculate_quad_q8_response(quad, material, nodes, element_displacements, 0.0, 0.0)?;
 
             Ok(ElementResponse2D::Quadrilateral(response))
         }
@@ -1254,15 +1411,166 @@ pub fn recover_element_response(
 pub fn recover_model_responses(
     model: &Model2D, global_displacements: &DVector<f64>,
 ) -> Result<Vec<(usize, ElementResponse2D)>, FemError> {
-    model
-        .elements()
-        .iter()
-        .map(|element| {
-            let response = recover_element_response(model, element, global_displacements)?;
+    recover_model_responses_with_progress(model, global_displacements, |_, _| {})
+}
 
-            Ok((element.id(), response))
-        })
-        .collect()
+/// Recovers all element responses while reporting `(completed, total)` counts.
+pub fn recover_model_responses_with_progress<F>(
+    model: &Model2D, global_displacements: &DVector<f64>, mut on_progress: F,
+) -> Result<Vec<(usize, ElementResponse2D)>, FemError>
+where
+    F: FnMut(usize, usize),
+{
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+    let total = model.elements().len();
+    let mut responses = Vec::with_capacity(total);
+    on_progress(0, total);
+
+    for (index, element) in model.elements().iter().enumerate() {
+        let response = recover_element_response_with_numbering(model, element, global_displacements, &numbering)?;
+        responses.push((element.id(), response));
+        on_progress(index + 1, total);
+    }
+
+    Ok(responses)
+}
+
+#[derive(Debug, Default)]
+struct NodalPlaneStressAccumulator {
+    strain: [f64; 3],
+    stress: [f64; 3],
+    equivalent_strain: f64,
+    contributions: usize,
+}
+
+impl NodalPlaneStressAccumulator {
+    fn add(&mut self, strain: [f64; 3], stress: [f64; 3], young_modulus: f64) {
+        for component in 0..3 {
+            self.strain[component] += strain[component];
+            self.stress[component] += stress[component];
+        }
+
+        let [sigma_x, sigma_y, tau_xy] = stress;
+        let von_mises = (sigma_x.powi(2) - sigma_x * sigma_y + sigma_y.powi(2) + 3.0 * tau_xy.powi(2)).sqrt();
+        self.equivalent_strain += von_mises / young_modulus;
+        self.contributions += 1;
+    }
+
+    fn finish(self, node_id: usize) -> NodalPlaneStressResponse2D {
+        let divisor = self.contributions as f64;
+        let mut strain = self.strain;
+        let mut stress = self.stress;
+
+        for component in 0..3 {
+            strain[component] /= divisor;
+            stress[component] /= divisor;
+        }
+
+        NodalPlaneStressResponse2D {
+            node_id,
+            strain,
+            stress,
+            equivalent_strain: self.equivalent_strain / divisor,
+            contributing_elements: self.contributions,
+        }
+    }
+}
+
+/// Recovers and averages plane-stress components at all supported mesh nodes.
+///
+/// T3 contributes its constant response to its three nodes. T6 is evaluated at
+/// all six natural nodes, Q4 uses Gauss-point extrapolation to the corners, and
+/// Q8 is evaluated at its eight natural nodes. Truss and beam elements do not
+/// contribute to this plane-stress result set.
+pub fn recover_nodal_plane_stress_responses(
+    model: &Model2D, global_displacements: &DVector<f64>,
+) -> Result<Vec<NodalPlaneStressResponse2D>, FemError> {
+    recover_nodal_plane_stress_responses_with_progress(model, global_displacements, |_, _| {})
+}
+
+/// Recovers nodal plane-stress responses while reporting `(completed, total)` elements.
+pub fn recover_nodal_plane_stress_responses_with_progress<F>(
+    model: &Model2D, global_displacements: &DVector<f64>, mut on_progress: F,
+) -> Result<Vec<NodalPlaneStressResponse2D>, FemError>
+where
+    F: FnMut(usize, usize),
+{
+    let numbering = validated_dof_numbering(model, global_displacements)?;
+    let total = model.elements().len();
+    let mut accumulators = HashMap::<usize, NodalPlaneStressAccumulator>::new();
+    on_progress(0, total);
+
+    for (index, element) in model.elements().iter().enumerate() {
+        let young_modulus = model.material(element.material_id())?.young_modulus();
+
+        match element {
+            Element2D::TriangleT3(triangle) => {
+                let response =
+                    recover_triangle_response_with_numbering(model, triangle, global_displacements, &numbering)?;
+
+                for &node_id in element.node_ids() {
+                    accumulators.entry(node_id).or_default().add(*response.strain(), *response.stress(), young_modulus);
+                }
+            }
+            Element2D::TriangleT6(triangle) => {
+                let (material, nodes, element_displacements) = extract_triangle_t6_response_data_with_numbering(
+                    model,
+                    triangle,
+                    global_displacements,
+                    &numbering,
+                )?;
+                let responses =
+                    calculate_triangle_t6_nodal_responses(triangle, material, nodes, element_displacements)?;
+
+                for (&node_id, response) in element.node_ids().iter().zip(responses) {
+                    accumulators.entry(node_id).or_default().add(*response.strain(), *response.stress(), young_modulus);
+                }
+            }
+            Element2D::QuadQ4(quad) => {
+                let (material, nodes, element_displacements) =
+                    extract_quad_response_data_with_numbering(model, quad, global_displacements, &numbering)?;
+                let responses = calculate_quad_responses(
+                    quad,
+                    material,
+                    nodes,
+                    element_displacements,
+                    QuadQ4RecoveryMode2D::Corner,
+                )?;
+
+                for (&node_id, response) in element.node_ids().iter().zip(responses) {
+                    accumulators.entry(node_id).or_default().add(*response.strain(), *response.stress(), young_modulus);
+                }
+            }
+            Element2D::QuadQ8(quad) => {
+                const NATURAL_NODES: [(f64, f64); 8] = [
+                    (-1.0, -1.0),
+                    (1.0, -1.0),
+                    (1.0, 1.0),
+                    (-1.0, 1.0),
+                    (0.0, -1.0),
+                    (1.0, 0.0),
+                    (0.0, 1.0),
+                    (-1.0, 0.0),
+                ];
+                let (material, nodes, element_displacements) =
+                    extract_quad_q8_response_data_with_numbering(model, quad, global_displacements, &numbering)?;
+
+                for (&node_id, (xi, eta)) in element.node_ids().iter().zip(NATURAL_NODES) {
+                    let response = calculate_quad_q8_response(quad, material, nodes, element_displacements, xi, eta)?;
+                    accumulators.entry(node_id).or_default().add(*response.strain(), *response.stress(), young_modulus);
+                }
+            }
+            Element2D::Truss(_) | Element2D::Beam(_) => {}
+        }
+
+        on_progress(index + 1, total);
+    }
+
+    let mut responses =
+        accumulators.into_iter().map(|(node_id, accumulator)| accumulator.finish(node_id)).collect::<Vec<_>>();
+    responses.sort_unstable_by_key(NodalPlaneStressResponse2D::node_id);
+
+    Ok(responses)
 }
 
 #[cfg(test)]
@@ -1272,8 +1580,10 @@ mod tests {
         calculate_triangle_response, find_node, interpolate_beam_displacement, interpolate_element_displacement,
         interpolate_quad_displacement, interpolate_quad_q8_displacement, interpolate_triangle_displacement,
         interpolate_triangle_t6_displacement, interpolate_truss_displacement, recover_beam_response,
-        recover_beam_section_response, recover_element_response, recover_model_responses, recover_quad_q8_response,
-        recover_quad_response, recover_quad_responses, recover_triangle_response, recover_triangle_t6_response,
+        recover_beam_section_response, recover_element_response, recover_model_responses,
+        recover_model_responses_with_progress, recover_nodal_plane_stress_responses_with_progress,
+        recover_quad_q8_response, recover_quad_response, recover_quad_responses, recover_triangle_response,
+        recover_triangle_t6_gauss_responses, recover_triangle_t6_nodal_responses, recover_triangle_t6_response,
         recover_truss_response,
     };
     use crate::analysis::iterative_solver::CgOptions;
@@ -2546,6 +2856,61 @@ mod tests {
     }
 
     #[test]
+    fn recovers_t6_responses_at_all_nodes_and_builds_nodal_average() {
+        let model = right_triangle_t6_model();
+        let triangle = match model.elements()[0] {
+            Element2D::TriangleT6(triangle) => triangle,
+            _ => panic!("expected a T6 triangle element"),
+        };
+        let poisson_ratio = 0.3;
+        let axial_strain = 0.01;
+        let displacements = DVector::from_row_slice(&[
+            0.0,
+            0.0,
+            axial_strain,
+            0.0,
+            0.0,
+            -poisson_ratio * axial_strain,
+            axial_strain / 2.0,
+            0.0,
+            axial_strain / 2.0,
+            -poisson_ratio * axial_strain / 2.0,
+            0.0,
+            -poisson_ratio * axial_strain / 2.0,
+        ]);
+        let local = recover_triangle_t6_nodal_responses(&model, &triangle, &displacements)
+            .expect("T6 nodal responses should be recovered");
+        let gauss = recover_triangle_t6_gauss_responses(&model, &triangle, &displacements)
+            .expect("T6 Gauss responses should be recovered");
+        let mut progress = Vec::new();
+        let averaged =
+            recover_nodal_plane_stress_responses_with_progress(&model, &displacements, |completed, total| {
+                progress.push((completed, total))
+            })
+            .expect("averaged nodal responses should be recovered");
+
+        assert_eq!(local.len(), 6);
+        assert_eq!(gauss.len(), 6);
+        assert_eq!(averaged.len(), 6);
+        assert_eq!(progress, vec![(0, 1), (1, 1)]);
+
+        for response in local {
+            assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+            assert_relative_eq!(response.stress()[1], 0.0, epsilon = 1e-12);
+            assert_relative_eq!(response.stress()[2], 0.0, epsilon = 1e-12);
+        }
+        for response in gauss {
+            assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+        }
+        for response in averaged {
+            assert_eq!(response.contributing_elements(), 1);
+            assert_relative_eq!(response.stress()[0], 2.0, epsilon = 1e-12);
+            assert_relative_eq!(response.von_mises_stress(), 2.0, epsilon = 1e-12);
+            assert_relative_eq!(response.equivalent_strain(), 0.01, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
     fn recovers_pure_shear_for_triangle() {
         let model = right_triangle_model([1, 2, 3]);
         let triangle = match model.elements()[0] {
@@ -3498,5 +3863,20 @@ mod tests {
         assert!(matches!(responses[0].1, ElementResponse2D::Triangle(_)));
         assert!(matches!(responses[1].1, ElementResponse2D::Beam(_)));
         assert!(matches!(responses[2].1, ElementResponse2D::Truss(_)));
+    }
+
+    #[test]
+    fn reports_model_recovery_progress_by_completed_element_count() {
+        let mut model = right_triangle_model([1, 2, 3]);
+        add_beam_element(&mut model, 20, [1, 2], 1.0, 2.0);
+        add_truss_element(&mut model, 30, [2, 3], 1.0);
+        let mut progress = Vec::new();
+
+        recover_model_responses_with_progress(&model, &DVector::zeros(8), |completed, total| {
+            progress.push((completed, total));
+        })
+        .expect("responses should be recovered");
+
+        assert_eq!(progress, vec![(0, 3), (1, 3), (2, 3), (3, 3)]);
     }
 }

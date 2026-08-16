@@ -142,6 +142,19 @@ pub struct CgResult {
     pub termination_reason: CgTerminationReason,
 }
 
+/// One convergence sample emitted while Conjugate Gradient is running.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgProgress {
+    /// Number of completed iterations.
+    pub iterations: usize,
+
+    /// Euclidean norm of the current residual.
+    pub residual_norm: f64,
+
+    /// Current residual norm divided by the norm of the right-hand side.
+    pub relative_residual_norm: f64,
+}
+
 /// Solves `A * x = b` using the Conjugate Gradient method.
 ///
 /// The matrix must be symmetric and positive definite. This is normally
@@ -162,6 +175,21 @@ pub fn preconditioned_conjugate_gradient<A, P>(
 where
     A: LinearOperator,
     P: Preconditioner,
+{
+    preconditioned_conjugate_gradient_with_progress(operator, rhs, options, preconditioner, |_| {})
+}
+
+/// Preconditioned Conjugate Gradient with a convergence callback.
+///
+/// The callback receives the initial residual at iteration zero and one sample
+/// after every completed iteration, including the terminating iteration.
+pub fn preconditioned_conjugate_gradient_with_progress<A, P, F>(
+    operator: &A, rhs: &[f64], options: CgOptions, preconditioner: &P, mut on_progress: F,
+) -> Result<CgResult, FemError>
+where
+    A: LinearOperator,
+    P: Preconditioner,
+    F: FnMut(CgProgress),
 {
     if !options.tolerance.is_finite() || options.tolerance <= 0.0 {
         return Err(FemError::InvalidSolverTolerance { value: options.tolerance });
@@ -191,6 +219,7 @@ where
     let rhs_norm = euclidean_norm(rhs);
     let mut residual_norm = euclidean_norm(&residual);
     let mut relative_residual = relative_residual_norm(residual_norm, rhs_norm);
+    on_progress(CgProgress { iterations: 0, residual_norm, relative_residual_norm: relative_residual });
 
     if relative_residual <= options.tolerance {
         return Ok(make_result(solution, 0, residual_norm, relative_residual, CgTerminationReason::Converged));
@@ -232,6 +261,7 @@ where
 
         residual_norm = euclidean_norm(&residual);
         relative_residual = relative_residual_norm(residual_norm, rhs_norm);
+        on_progress(CgProgress { iterations: iteration + 1, residual_norm, relative_residual_norm: relative_residual });
 
         if relative_residual <= options.tolerance {
             return Ok(make_result(
@@ -355,6 +385,7 @@ fn euclidean_norm(vector: &[f64]) -> f64 {
 mod tests {
     use super::{
         CgOptions, CgTerminationReason, JacobiPreconditioner, conjugate_gradient, preconditioned_conjugate_gradient,
+        preconditioned_conjugate_gradient_with_progress,
     };
     use crate::analysis::sparse::CooMatrix;
     use crate::error::FemError;
@@ -389,6 +420,32 @@ mod tests {
         // x = 1/11, y = 7/11
         assert!((result.solution[0] - 1.0 / 11.0).abs() < 1e-10);
         assert!((result.solution[1] - 7.0 / 11.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn reports_initial_and_iterative_residual_progress() {
+        let mut matrix = CooMatrix::new(2, 2);
+        matrix.push(0, 0, 4.0).unwrap();
+        matrix.push(0, 1, 1.0).unwrap();
+        matrix.push(1, 0, 1.0).unwrap();
+        matrix.push(1, 1, 3.0).unwrap();
+        let matrix = matrix.into_csr();
+        let preconditioner = JacobiPreconditioner::from_matrix(&matrix).unwrap();
+        let mut progress = Vec::new();
+
+        let result = preconditioned_conjugate_gradient_with_progress(
+            &matrix,
+            &[1.0, 2.0],
+            CgOptions { max_iterations: 100, tolerance: 1e-12, ..CgOptions::default() },
+            &preconditioner,
+            |sample| progress.push(sample),
+        )
+        .unwrap();
+
+        assert_eq!(progress.first().unwrap().iterations, 0);
+        assert_eq!(progress.first().unwrap().relative_residual_norm, 1.0);
+        assert_eq!(progress.last().unwrap().iterations, result.iterations);
+        assert_eq!(progress.last().unwrap().relative_residual_norm, result.relative_residual_norm);
     }
 
     #[test]
