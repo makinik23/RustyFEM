@@ -224,6 +224,48 @@ pub enum LoadCoordinateSystem2DInput {
 }
 
 impl Model2DInput {
+    /// Creates a serializable snapshot of an existing validated model.
+    #[must_use]
+    pub fn from_model(model: &Model2D) -> Self {
+        Self {
+            analysis_settings: AnalysisSettings2DInput::from_model(model),
+            materials: model
+                .materials()
+                .materials()
+                .iter()
+                .map(|&(id, material)| Material2DInput {
+                    id,
+                    young_modulus: material.young_modulus(),
+                    poisson_ratio: material.poisson_ratio(),
+                    density: material.density(),
+                })
+                .collect(),
+            sections: model
+                .sections()
+                .sections()
+                .iter()
+                .map(|&(id, section)| Section2DInput { id, kind: section.into() })
+                .collect(),
+            nodes: model.nodes().iter().map(|node| Node2DInput { id: node.id(), x: node.x(), y: node.y() }).collect(),
+            elements: model.elements().iter().map(ElementType2DInput::from).collect(),
+            constraints: model
+                .constraints()
+                .iter()
+                .map(|constraint| DisplacementConstraint2DInput {
+                    node: constraint.node_id(),
+                    dof: constraint.dof().into(),
+                    value: constraint.displacement(),
+                })
+                .collect(),
+            loads: model.element_loads().iter().map(ElementLoad2DInput::from).collect(),
+            nodal_loads: model
+                .loads()
+                .iter()
+                .map(|load| NodalLoad2DInput { node: load.node_id(), dof: load.dof().into(), value: load.value() })
+                .collect(),
+        }
+    }
+
     /// Builds a validated `Model2D` using the same insertion API as hand-written models.
     pub fn into_model(self) -> Result<Model2D, FemError> {
         let mut model = Model2D::new();
@@ -266,6 +308,122 @@ impl Model2DInput {
         }
 
         Ok(model)
+    }
+}
+
+impl AnalysisSettings2DInput {
+    fn from_model(model: &Model2D) -> Self {
+        let settings = model.analysis_settings();
+
+        Self {
+            solver: Some(settings.solver().into()),
+            cg_tolerance: Some(settings.cg_tolerance()),
+            cg_max_iterations: Some(settings.cg_max_iterations()),
+            cg_stagnation_window: Some(settings.cg_stagnation_window()),
+            cg_stagnation_tolerance: Some(settings.cg_stagnation_tolerance()),
+        }
+    }
+}
+
+impl From<SolverKind2D> for SolverKind2DInput {
+    fn from(value: SolverKind2D) -> Self {
+        match value {
+            SolverKind2D::Dense => Self::Dense,
+            SolverKind2D::Sparse => Self::Sparse,
+        }
+    }
+}
+
+impl From<Section2D> for Section2DInputKind {
+    fn from(value: Section2D) -> Self {
+        match value {
+            Section2D::Truss(section) => Self::Truss(TrussSection2DInput { area: section.cross_section_area() }),
+            Section2D::Beam(section) => Self::Beam(BeamSection2DInput {
+                area: section.cross_section_area(),
+                second_moment_of_area: section.second_moment_of_area(),
+                height: section.section_height(),
+            }),
+            Section2D::PlaneStress(section) => {
+                Self::PlaneStress(PlaneStressSection2DInput { thickness: section.thickness() })
+            }
+        }
+    }
+}
+
+impl From<Dof2D> for Dof2DInput {
+    fn from(value: Dof2D) -> Self {
+        match value {
+            Dof2D::Ux => Self::Ux,
+            Dof2D::Uy => Self::Uy,
+            Dof2D::Rz => Self::Rz,
+        }
+    }
+}
+
+impl From<&Element2D> for ElementType2DInput {
+    fn from(value: &Element2D) -> Self {
+        let id = value.id();
+        let nodes = value.node_ids();
+        let material = value.material_id();
+        let section = value.section_id();
+
+        match value {
+            Element2D::Truss(_) => Self::Truss { id, nodes: [nodes[0], nodes[1]], material, section },
+            Element2D::Beam(_) => Self::Beam { id, nodes: [nodes[0], nodes[1]], material, section },
+            Element2D::TriangleT3(_) => {
+                Self::TriangleT3 { id, nodes: [nodes[0], nodes[1], nodes[2]], material, section }
+            }
+            Element2D::TriangleT6(_) => {
+                Self::T6 { id, nodes: nodes.try_into().expect("T6 connectivity has six nodes"), material, section }
+            }
+            Element2D::QuadQ4(_) => {
+                Self::Q4 { id, nodes: nodes.try_into().expect("Q4 connectivity has four nodes"), material, section }
+            }
+            Element2D::QuadQ8(_) => {
+                Self::Q8 { id, nodes: nodes.try_into().expect("Q8 connectivity has eight nodes"), material, section }
+            }
+        }
+    }
+}
+
+impl From<&ElementLoad2D> for ElementLoad2DInput {
+    fn from(value: &ElementLoad2D) -> Self {
+        let kind = match value {
+            ElementLoad2D::BeamUniformLine(load) => ElementLoad2DInputKind::BeamUniform {
+                element: load.element_id(),
+                coordinate_system: load.coordinate_system().into(),
+                qx: load.x_component(),
+                qy: load.y_component(),
+            },
+            ElementLoad2D::EdgeTraction(load) => ElementLoad2DInputKind::EdgeTraction {
+                element: load.element_id(),
+                edge: load.edge_node_ids(),
+                coordinate_system: load.coordinate_system().into(),
+                tx: load.x_component(),
+                ty: load.y_component(),
+            },
+            ElementLoad2D::BodyForce(load) => ElementLoad2DInputKind::BodyForce {
+                element: load.element_id(),
+                bx: load.x_component(),
+                by: load.y_component(),
+            },
+            ElementLoad2D::SelfWeight(load) => ElementLoad2DInputKind::SelfWeight {
+                element: load.element_id(),
+                ax: load.x_acceleration(),
+                ay: load.y_acceleration(),
+            },
+        };
+
+        Self { kind }
+    }
+}
+
+impl From<LoadCoordinateSystem2D> for LoadCoordinateSystem2DInput {
+    fn from(value: LoadCoordinateSystem2D) -> Self {
+        match value {
+            LoadCoordinateSystem2D::Global => Self::Global,
+            LoadCoordinateSystem2D::Local => Self::Local,
+        }
     }
 }
 
@@ -494,5 +652,19 @@ mod tests {
         let element: Element2D = element.try_into().expect("element should convert");
 
         assert!(matches!(element, Element2D::TriangleT3(_)));
+    }
+
+    #[test]
+    fn snapshots_and_rebuilds_a_validated_model() {
+        let input: Model2DInput = serde_json::from_str(include_str!("../../examples/t3_cantilever.json"))
+            .expect("example input should deserialize");
+        let model = input.into_model().expect("example model should build");
+
+        let snapshot = Model2DInput::from_model(&model);
+        let rebuilt = snapshot.clone().into_model().expect("snapshot should rebuild");
+        let rebuilt_snapshot = Model2DInput::from_model(&rebuilt);
+
+        assert_eq!(rebuilt.analysis_settings(), model.analysis_settings());
+        assert_eq!(rebuilt_snapshot, snapshot);
     }
 }

@@ -5,7 +5,7 @@ use nalgebra::{DMatrix, DVector};
 use crate::analysis::assembly::{assemble_sparse_stiffness_matrix, assemble_stiffness_matrix};
 use crate::analysis::boundary_conditions::{apply_displacement_constraints, apply_displacement_constraints_sparse};
 use crate::analysis::iterative_solver::{
-    CgOptions, CgTerminationReason, JacobiPreconditioner, preconditioned_conjugate_gradient,
+    CgOptions, CgProgress, CgTerminationReason, JacobiPreconditioner, preconditioned_conjugate_gradient_with_progress,
 };
 use crate::analysis::load_vector::assemble_load_vector;
 use crate::analysis::sparse::CsrMatrix;
@@ -61,9 +61,24 @@ impl AnalysisResult2D {
 
 /// Solves a 2D model using the solver selected in its analysis settings.
 pub fn solve_with_settings(model: &Model2D) -> Result<AnalysisResult2D, FemError> {
+    solve_with_settings_and_progress(model, |_| {})
+}
+
+/// Solves a 2D model and reports sparse CG convergence samples.
+///
+/// Dense solves do not emit iteration samples because the direct factorization
+/// has no iterative residual history.
+pub fn solve_with_settings_and_progress<F>(model: &Model2D, on_progress: F) -> Result<AnalysisResult2D, FemError>
+where
+    F: FnMut(CgProgress),
+{
     match model.analysis_settings().solver() {
         SolverKind2D::Dense => solve(model),
-        SolverKind2D::Sparse => solve_sparse_with_options(model, cg_options_from_settings(model.analysis_settings())),
+        SolverKind2D::Sparse => solve_sparse_with_options_and_progress(
+            model,
+            cg_options_from_settings(model.analysis_settings()),
+            on_progress,
+        ),
     }
 }
 
@@ -147,6 +162,16 @@ pub fn solve_sparse(model: &Model2D) -> Result<AnalysisResult2D, FemError> {
 
 /// Sparse solver variant with explicit iterative-solver settings.
 pub fn solve_sparse_with_options(model: &Model2D, options: CgOptions) -> Result<AnalysisResult2D, FemError> {
+    solve_sparse_with_options_and_progress(model, options, |_| {})
+}
+
+/// Sparse solver variant that reports CG convergence after every iteration.
+pub fn solve_sparse_with_options_and_progress<F>(
+    model: &Model2D, options: CgOptions, on_progress: F,
+) -> Result<AnalysisResult2D, FemError>
+where
+    F: FnMut(CgProgress),
+{
     let numbering = DofNumbering2D::from_model(model)?;
 
     let original_stiffness_matrix = assemble_sparse_stiffness_matrix(model)?;
@@ -167,11 +192,12 @@ pub fn solve_sparse_with_options(model: &Model2D, options: CgOptions) -> Result<
 
     let preconditioner = JacobiPreconditioner::from_matrix(&constrained_stiffness_matrix)?;
 
-    let cg_result = preconditioned_conjugate_gradient(
+    let cg_result = preconditioned_conjugate_gradient_with_progress(
         &constrained_stiffness_matrix,
         &constrained_load_vector,
         options,
         &preconditioner,
+        on_progress,
     )?;
 
     if !cg_result.converged {

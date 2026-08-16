@@ -4,13 +4,20 @@
 //! `cargo bench --bench plate_stress_concentration -- --t3-mesh-only`.
 
 use rusty_fem::analysis::iterative_solver::CgOptions;
-use rusty_fem::analysis::solver::solve_sparse_with_options;
+use rusty_fem::analysis::solver::{solve_sparse_with_options, solve_with_settings};
 use rusty_fem::analysis::stress_recovery::{
-    recover_quad_q8_response, recover_triangle_response, recover_triangle_t6_response,
+    recover_nodal_plane_stress_responses, recover_quad_q8_response, recover_triangle_response,
+    recover_triangle_t6_response,
 };
 use rusty_fem::elements::{
     Element2D, QuadQ8, TriangleT3, TriangleT6, quad_q8_shape_function_derivatives,
     triangle_t6_shape_function_derivatives, triangle_t6_shape_functions,
+};
+use rusty_fem::io::{
+    AnalysisSettings2DInput, BeamSection2DInput, DisplacementConstraint2DInput, Dof2DInput, ElementLoad2DInput,
+    ElementLoad2DInputKind, ElementType2DInput, LoadCoordinateSystem2DInput, Material2DInput, Model2DInput,
+    NodalLoad2DInput, Node2DInput, PlaneStressSection2DInput, Section2DInput, Section2DInputKind, SolverKind2DInput,
+    TrussSection2DInput,
 };
 use rusty_fem::model::{
     DEFAULT_MATERIAL_ID, DisplacementConstraint2D, Dof2D, DofNumbering2D, EdgeTraction2D, ElementLoad2D,
@@ -43,6 +50,10 @@ const EXPERIMENTAL_RIGHT_ALPHA: f64 = 2.61;
 const MESH_SVG_PATH: &str = "target/plate_stress_concentration_mesh.svg";
 const SIGMA_X_SVG_PATH: &str = "target/plate_stress_concentration_sigma_x.svg";
 const SIGMA_Y_SVG_PATH: &str = "target/plate_stress_concentration_sigma_y.svg";
+const T3_JSON_EXAMPLE_PATH: &str = "examples/plate_stress_concentration_t3.json";
+const T6_JSON_EXAMPLE_PATH: &str = "examples/plate_stress_concentration_t6.json";
+const T6_IMPROVED_JSON_EXAMPLE_PATH: &str = "examples/plate_stress_concentration_t6_improved_mesh.json";
+const T6_DENSE_JSON_EXAMPLE_PATH: &str = "examples/plate_stress_concentration_t6_dense.json";
 const T3_MESH_SVG_PATH: &str = "target/plate_stress_concentration/plate_stress_concentration_t3_mesh.svg";
 const T3_SIGMA_X_SVG_PATH: &str = "target/plate_stress_concentration/plate_stress_concentration_t3_sigma_x.svg";
 const T3_SIGMA_Y_SVG_PATH: &str = "target/plate_stress_concentration/plate_stress_concentration_t3_sigma_y.svg";
@@ -342,6 +353,20 @@ struct T3T6VonMisesComparisonOutput {
     shared_von_mises_scale: f64,
 }
 
+struct T6JsonConvergenceOutput {
+    mesh: &'static str,
+    element_count: usize,
+    node_count: usize,
+    left_sigma_y: f64,
+    left_alpha: f64,
+    right_sigma_y: f64,
+    right_alpha: f64,
+    max_von_mises: f64,
+    iterations: usize,
+    relative_residual: f64,
+    elapsed_seconds: f64,
+}
+
 fn main() {
     run_mesh_smoke_check();
 
@@ -367,6 +392,36 @@ fn main() {
 
         println!(
             "plate T3 mesh SVG written to {T3_MESH_SVG_PATH}: elements = {}, nodes = {}",
+            benchmark.model.elements().len(),
+            benchmark.model.nodes().len()
+        );
+
+        return;
+    }
+
+    if std::env::args().any(|argument| argument == "--t3-json") {
+        let benchmark = plate_t3_benchmark_model();
+
+        write_model_2d_json_example(&benchmark.model, T3_JSON_EXAMPLE_PATH)
+            .expect("T3 plate JSON example should be written");
+
+        println!(
+            "plate T3 JSON example written to {T3_JSON_EXAMPLE_PATH}: elements = {}, nodes = {}",
+            benchmark.model.elements().len(),
+            benchmark.model.nodes().len()
+        );
+
+        return;
+    }
+
+    if std::env::args().any(|argument| argument == "--t6-json") {
+        let benchmark = plate_t6_benchmark_model();
+
+        write_model_2d_json_example(&benchmark.model, T6_JSON_EXAMPLE_PATH)
+            .expect("T6 plate JSON example should be written");
+
+        println!(
+            "plate T6 JSON example written to {T6_JSON_EXAMPLE_PATH}: elements = {}, nodes = {}",
             benchmark.model.elements().len(),
             benchmark.model.nodes().len()
         );
@@ -463,6 +518,36 @@ fn main() {
         return;
     }
 
+    if std::env::args().any(|argument| argument == "--t6-json-convergence") {
+        let outputs = black_box(run_t6_json_mesh_convergence());
+
+        println!(
+            "| mesh | elements | nodes | A/R25 sigma_y [MPa] | A/R25 error | A/R25 alpha | B/R50 sigma_y [MPa] | B/R50 error | B/R50 alpha | max von Mises [MPa] | CG iterations | relative residual | elapsed [s] |"
+        );
+        println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+
+        for output in outputs {
+            println!(
+                "| {} | {} | {} | {:.6} | {:+.2}% | {:.6} | {:.6} | {:+.2}% | {:.6} | {:.6} | {} | {:.3e} | {:.3} |",
+                output.mesh,
+                output.element_count,
+                output.node_count,
+                output.left_sigma_y,
+                relative_error_percent(output.left_sigma_y, EXPERIMENTAL_LEFT_SIGMA_Y),
+                output.left_alpha,
+                output.right_sigma_y,
+                relative_error_percent(output.right_sigma_y, EXPERIMENTAL_RIGHT_SIGMA_Y),
+                output.right_alpha,
+                output.max_von_mises,
+                output.iterations,
+                output.relative_residual,
+                output.elapsed_seconds,
+            );
+        }
+
+        return;
+    }
+
     let started = Instant::now();
     let output = black_box(run_reference_benchmark());
     let elapsed = started.elapsed();
@@ -495,6 +580,68 @@ fn main() {
     );
 }
 
+fn run_t6_json_mesh_convergence() -> Vec<T6JsonConvergenceOutput> {
+    [
+        ("reference", T6_JSON_EXAMPLE_PATH),
+        ("improved", T6_IMPROVED_JSON_EXAMPLE_PATH),
+        ("dense", T6_DENSE_JSON_EXAMPLE_PATH),
+    ]
+    .into_iter()
+    .map(|(mesh, path)| run_t6_json_mesh(mesh, path))
+    .collect()
+}
+
+fn run_t6_json_mesh(mesh: &'static str, path: &str) -> T6JsonConvergenceOutput {
+    let input: Model2DInput = serde_json::from_str(&fs::read_to_string(path).expect("T6 JSON should be readable"))
+        .expect("T6 JSON should parse");
+    let model = input.into_model().expect("T6 JSON model should build");
+
+    assert!(model.elements().iter().all(|element| matches!(element, Element2D::TriangleT6(_))));
+
+    let started = Instant::now();
+    let result = solve_with_settings(&model).expect("T6 JSON model should solve");
+    let responses = recover_nodal_plane_stress_responses(&model, result.displacements())
+        .expect("T6 nodal responses should be recovered");
+    let response_by_node = responses.iter().map(|response| (response.node_id(), response)).collect::<HashMap<_, _>>();
+    let left_node = nearest_node(&model, -NOTCH_DEPTH, 0.0);
+    let right_node = nearest_node(&model, NOTCH_DEPTH, 0.0);
+    let left_sigma_y = response_by_node[&left_node.id()].stress()[1];
+    let right_sigma_y = response_by_node[&right_node.id()].stress()[1];
+    let max_von_mises = responses.iter().map(|response| response.von_mises_stress()).fold(0.0_f64, f64::max);
+    let report = result.solver_report().expect("JSON benchmark should use the sparse solver");
+    let sigma_nominal = REFERENCE_MASS * GRAVITY / ((WIDTH - 2.0 * NOTCH_DEPTH) * THICKNESS);
+
+    assert!((left_node.x() + NOTCH_DEPTH).abs() < 1e-9 && left_node.y().abs() < 1e-9);
+    assert!((right_node.x() - NOTCH_DEPTH).abs() < 1e-9 && right_node.y().abs() < 1e-9);
+    assert!(left_sigma_y.is_finite() && right_sigma_y.is_finite() && max_von_mises.is_finite());
+
+    T6JsonConvergenceOutput {
+        mesh,
+        element_count: model.elements().len(),
+        node_count: model.nodes().len(),
+        left_sigma_y,
+        left_alpha: left_sigma_y / sigma_nominal,
+        right_sigma_y,
+        right_alpha: right_sigma_y / sigma_nominal,
+        max_von_mises,
+        iterations: report.iterations,
+        relative_residual: report.relative_residual_norm,
+        elapsed_seconds: started.elapsed().as_secs_f64(),
+    }
+}
+
+fn nearest_node(model: &Model2D, x: f64, y: f64) -> &Node2D {
+    model
+        .nodes()
+        .iter()
+        .min_by(|first, second| {
+            let first_distance = (first.x() - x).powi(2) + (first.y() - y).powi(2);
+            let second_distance = (second.x() - x).powi(2) + (second.y() - y).powi(2);
+            first_distance.total_cmp(&second_distance)
+        })
+        .expect("benchmark model should contain nodes")
+}
+
 fn run_mesh_smoke_check() {
     let spec = PlateMeshSpec::smoke_q8();
     let benchmark = plate_q8_benchmark_model(spec);
@@ -504,6 +651,163 @@ fn run_mesh_smoke_check() {
     assert_eq!(benchmark.model.element_loads().len(), spec.top_elements + spec.bottom_elements);
     assert_relative_error_below(benchmark.sigma_nominal, 13.475274725274724, 1e-12, "nominal stress");
     validate_q8_corner_jacobians(&benchmark.model);
+}
+
+fn write_model_2d_json_example(model: &Model2D, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let input = model_2d_input_from_model(model);
+    let contents = serde_json::to_string_pretty(&input)?;
+
+    fs::write(path, format!("{contents}\n"))?;
+
+    Ok(())
+}
+
+fn model_2d_input_from_model(model: &Model2D) -> Model2DInput {
+    Model2DInput {
+        analysis_settings: AnalysisSettings2DInput {
+            solver: Some(SolverKind2DInput::Sparse),
+            cg_tolerance: Some(1e-8),
+            cg_max_iterations: Some(100_000),
+            cg_stagnation_window: Some(0),
+            cg_stagnation_tolerance: Some(1e-12),
+        },
+        materials: model
+            .materials()
+            .materials()
+            .iter()
+            .map(|(id, material)| Material2DInput {
+                id: *id,
+                young_modulus: material.young_modulus(),
+                poisson_ratio: material.poisson_ratio(),
+                density: material.density(),
+            })
+            .collect(),
+        sections: model
+            .sections()
+            .sections()
+            .iter()
+            .map(|(id, section)| Section2DInput { id: *id, kind: section_input_kind(section) })
+            .collect(),
+        nodes: model.nodes().iter().map(|node| Node2DInput { id: node.id(), x: node.x(), y: node.y() }).collect(),
+        elements: model.elements().iter().map(element_input).collect(),
+        constraints: model
+            .constraints()
+            .iter()
+            .map(|constraint| DisplacementConstraint2DInput {
+                node: constraint.node_id(),
+                dof: dof_input(constraint.dof()),
+                value: constraint.displacement(),
+            })
+            .collect(),
+        loads: model.element_loads().iter().map(element_load_input).collect(),
+        nodal_loads: model
+            .loads()
+            .iter()
+            .map(|load| NodalLoad2DInput { node: load.node_id(), dof: dof_input(load.dof()), value: load.value() })
+            .collect(),
+    }
+}
+
+fn section_input_kind(section: &Section2D) -> Section2DInputKind {
+    match section {
+        Section2D::Truss(section) => {
+            Section2DInputKind::Truss(TrussSection2DInput { area: section.cross_section_area() })
+        }
+        Section2D::Beam(section) => Section2DInputKind::Beam(BeamSection2DInput {
+            area: section.cross_section_area(),
+            second_moment_of_area: section.second_moment_of_area(),
+            height: section.section_height(),
+        }),
+        Section2D::PlaneStress(section) => {
+            Section2DInputKind::PlaneStress(PlaneStressSection2DInput { thickness: section.thickness() })
+        }
+    }
+}
+
+fn element_input(element: &Element2D) -> ElementType2DInput {
+    match element {
+        Element2D::Truss(_) => ElementType2DInput::Truss {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("truss should have two nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+        Element2D::Beam(_) => ElementType2DInput::Beam {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("beam should have two nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+        Element2D::TriangleT3(_) => ElementType2DInput::TriangleT3 {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("T3 should have three nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+        Element2D::TriangleT6(_) => ElementType2DInput::T6 {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("T6 should have six nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+        Element2D::QuadQ4(_) => ElementType2DInput::Q4 {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("Q4 should have four nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+        Element2D::QuadQ8(_) => ElementType2DInput::Q8 {
+            id: element.id(),
+            nodes: element.node_ids().try_into().expect("Q8 should have eight nodes"),
+            material: element.material_id(),
+            section: element.section_id(),
+        },
+    }
+}
+
+fn element_load_input(load: &ElementLoad2D) -> ElementLoad2DInput {
+    let kind = match load {
+        ElementLoad2D::BeamUniformLine(load) => ElementLoad2DInputKind::BeamUniform {
+            element: load.element_id(),
+            coordinate_system: load_coordinate_system_input(load.coordinate_system()),
+            qx: load.x_component(),
+            qy: load.y_component(),
+        },
+        ElementLoad2D::EdgeTraction(load) => ElementLoad2DInputKind::EdgeTraction {
+            element: load.element_id(),
+            edge: load.edge_node_ids(),
+            coordinate_system: load_coordinate_system_input(load.coordinate_system()),
+            tx: load.x_component(),
+            ty: load.y_component(),
+        },
+        ElementLoad2D::BodyForce(load) => ElementLoad2DInputKind::BodyForce {
+            element: load.element_id(),
+            bx: load.x_component(),
+            by: load.y_component(),
+        },
+        ElementLoad2D::SelfWeight(load) => ElementLoad2DInputKind::SelfWeight {
+            element: load.element_id(),
+            ax: load.x_acceleration(),
+            ay: load.y_acceleration(),
+        },
+    };
+
+    ElementLoad2DInput { kind }
+}
+
+fn dof_input(dof: Dof2D) -> Dof2DInput {
+    match dof {
+        Dof2D::Ux => Dof2DInput::Ux,
+        Dof2D::Uy => Dof2DInput::Uy,
+        Dof2D::Rz => Dof2DInput::Rz,
+    }
+}
+
+fn load_coordinate_system_input(coordinate_system: LoadCoordinateSystem2D) -> LoadCoordinateSystem2DInput {
+    match coordinate_system {
+        LoadCoordinateSystem2D::Global => LoadCoordinateSystem2DInput::Global,
+        LoadCoordinateSystem2D::Local => LoadCoordinateSystem2DInput::Local,
+    }
 }
 
 fn run_reference_benchmark() -> PlateBenchmarkOutput {

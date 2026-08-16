@@ -6,6 +6,10 @@ rust-version = "1.89.0"
 description = "Educational finite element method solver written in Rust."
 license = "MIT"
 
+[workspace]
+members = ["crates/rusty-fem-gui"]
+resolver = "3"
+
 [lib]
 name = "rusty_fem"
 path = "src/lib.rs"

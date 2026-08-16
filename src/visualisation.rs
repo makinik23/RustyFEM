@@ -622,6 +622,18 @@ fn scalar_patch_max_value(
 
 fn scalar_color(value: f64, min_value: f64, max_value: f64) -> String {
     let fraction = ((value - min_value) / (max_value - min_value)).clamp(0.0, 1.0);
+    let [red, green, blue] = scalar_color_rgb(fraction);
+
+    format!("#{red:02x}{green:02x}{blue:02x}")
+}
+
+/// Returns the RGB color used by RustyFEM scalar contours.
+///
+/// `fraction` is clamped to the range from the blue minimum to the red
+/// maximum. The GUI and SVG renderer share this function so their result
+/// fields use an identical palette.
+pub fn scalar_color_rgb(fraction: f64) -> [u8; 3] {
+    let fraction = fraction.clamp(0.0, 1.0);
     let color_stops = [
         (0.0, [0, 0, 255]),
         (0.2, [0, 180, 255]),
@@ -644,7 +656,7 @@ fn scalar_color(value: f64, min_value: f64, max_value: f64) -> String {
     let green = interpolate_color_channel(start_color[1], end_color[1], local_fraction);
     let blue = interpolate_color_channel(start_color[2], end_color[2], local_fraction);
 
-    format!("#{red:02x}{green:02x}{blue:02x}")
+    [red, green, blue]
 }
 
 fn interpolate_color_channel(start: u8, end: u8, fraction: f64) -> u8 {
